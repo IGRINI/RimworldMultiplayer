@@ -327,7 +327,12 @@ namespace Multiplayer.Client
 
                 keepTheMap = false;
 
-                Multiplayer.game.sync.TryAddCommandRandomState(randState);
+                // Per-map cmd RNG state, scoped by map.uniqueID. Streaming peers see different
+                // map-scoped cmds, so a flat global list creates false desyncs. The
+                // SyncCoordinator has a per-map sibling that routes into the right
+                // MapRandomStateData entry (CheckForDesync compares map states only on the
+                // intersection of loaded maps).
+                Multiplayer.game.sync.TryAddMapCommandRandomState(map.uniqueID, randState);
 
                 eventCount++;
 

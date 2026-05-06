@@ -108,11 +108,16 @@ public static class MpSettingsUI
 
         // Section 8: opt-in auto-rejoin. Off by default — rejoin throws away the local sim and
         // silent recovery has historically hidden real determinism bugs. Hand the user the choice.
-        // Translation keys MpAutoRejoinOnDesync / MpAutoRejoinOnDesyncDesc need to be added to the
-        // separate Multiplayer-Locale repo (the Languages/ folder is a submodule). Until that
-        // lands the toggle shows the raw key — same pattern as every other untranslated MP string.
-        listing.CheckboxLabeled("MpAutoRejoinOnDesync".Translate(), ref settings.autoRejoinOnDesync,
-            "MpAutoRejoinOnDesyncDesc".Translate());
+        //
+        // Translation keys MpAutoRejoinOnDesync / MpAutoRejoinOnDesyncDesc are intentionally NOT
+        // wired through .Translate() yet: the Languages/ folder is a separate submodule
+        // (rwmt/Multiplayer-Locale) that this branch can't update. Shipping a raw "MpAutoRejoinOnDesync"
+        // key in production would be visible noise. Use English literals here; once the locale
+        // PR lands, swap to "MpAutoRejoinOnDesync".Translate() / "MpAutoRejoinOnDesyncDesc".Translate().
+        listing.CheckboxLabeled(
+            "Auto-rejoin on desync",
+            ref settings.autoRejoinOnDesync,
+            "When a desync is detected, automatically request a fresh world from the server. The desync window still appears so you can see what happened, but the rejoin proceeds after a short delay.");
 
         if (Prefs.DevMode)
         {

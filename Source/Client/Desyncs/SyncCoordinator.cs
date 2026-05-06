@@ -187,7 +187,10 @@ namespace Multiplayer.Client
         }
 
         /// <summary>
-        /// Adds a random state to the commandRandomStates list
+        /// Adds a random state to the commandRandomStates list. World-scoped (global) cmds only —
+        /// every peer sees these. Map-scoped cmds use TryAddMapCommandRandomState because in
+        /// standalone streaming peers can have different loaded-map subsets and a flat list
+        /// would produce false desyncs across them.
         /// </summary>
         /// <param name="state">The state to add</param>
         public void TryAddCommandRandomState(ulong state)
@@ -195,6 +198,18 @@ namespace Multiplayer.Client
             if (!ShouldCollect) return;
             OpinionInBuilding.TryMarkSimulating();
             OpinionInBuilding.commandRandomStates.Add((uint) (state >> 32));
+        }
+
+        /// <summary>
+        /// Adds a random state captured during execution of a map-scoped command. Routed into
+        /// the per-map random state list keyed by mapId so CheckForDesync can compare it only
+        /// across peers that have the same map loaded.
+        /// </summary>
+        public void TryAddMapCommandRandomState(int mapId, ulong state)
+        {
+            if (!ShouldCollect) return;
+            OpinionInBuilding.TryMarkSimulating();
+            OpinionInBuilding.GetRandomStatesForMap(mapId).Add((uint) (state >> 32));
         }
 
         /// <summary>

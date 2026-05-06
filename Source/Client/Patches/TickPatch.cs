@@ -82,14 +82,16 @@ namespace Multiplayer.Client
             }
         }
 
-        // O(1) id lookup. Cache is keyed on the actual sequence of map uniqueIDs, not just the
-        // count. Streaming reload, Rejoiner.DoRejoin, and replay scrubbing can swap maps without
-        // changing Find.Maps.Count — keying on count alone returns stale AsyncTimeComp instances
-        // and routes commands to ghosts. The per-call sentinel walk is N int comparisons (N≤~10
-        // in practice), still much cheaper than the original FirstOrDefault+lambda. Reset() clears
-        // the cache so a session reload starts fresh.
+        // O(1) id lookup. Cache is keyed on actual Map reference identity, not just count or
+        // uniqueID. Streaming reload, Rejoiner.DoRejoin, and replay scrubbing can swap Map and
+        // AsyncTimeComp objects while preserving the same uniqueIDs (e.g. the game reloads from
+        // a save and reconstructs Map instances) — keying on uniqueID alone returns stale
+        // AsyncTimeComp instances from the previous world. ReferenceEquals against the live
+        // Find.Maps catches that. The per-call sentinel walk is N reference comparisons (N≤~10
+        // in practice), still much cheaper than the original FirstOrDefault+lambda. Reset()
+        // clears the cache so a session reload starts fresh.
         private static readonly Dictionary<int, ITickable> tickableLookup = new();
-        private static int[] tickableLookupKey = Array.Empty<int>();
+        private static Map[] tickableLookupKey = Array.Empty<Map>();
 
         static Stopwatch updateTimer = Stopwatch.StartNew();
         public static Stopwatch tickTimer = Stopwatch.StartNew();
@@ -253,6 +255,11 @@ namespace Multiplayer.Client
                         continue;
                     }
                     target.ExecuteCmd(cmd);
+
+                    // ExecuteCmd may have triggered TriggerProtocolDesync (sim-cmd exception per
+                    // Section 10). Bail before running any more commands or letting DoUpdate
+                    // proceed to DoTick — the next tick's Prefix/ShouldHandle gate is too late.
+                    if (Multiplayer.session.desynced) return true;
                 }
             }
 
@@ -298,6 +305,11 @@ namespace Multiplayer.Client
                             Log.Error($"!!! Tickable of {cmd.mapId} not found! {cmd}");
                         }
                     } else target.ExecuteCmd(cmd);
+
+                    // Same fast-halt as the deferred loop: if the cmd we just executed flipped
+                    // the session into desynced state (Section 10 exception path or any other
+                    // TriggerProtocolDesync caller), don't keep dispatching more commands.
+                    if (Multiplayer.session.desynced) return true;
 
                     if (LongEventHandler.eventQueue.Count > 0) return true; // Yield to e.g. join-point creation
                 }
@@ -427,7 +439,7 @@ namespace Multiplayer.Client
             realTime = 0;
             deferredCmds.Clear();
             tickableLookup.Clear();
-            tickableLookupKey = Array.Empty<int>();
+            tickableLookupKey = Array.Empty<Map>();
             TimeControlPatch.prePauseTimeSpeed = null;
             RoundMode.Reset();
         }
@@ -438,15 +450,16 @@ namespace Multiplayer.Client
         {
             var maps = Find.Maps;
 
-            // Identity check: same length AND same sequence of uniqueIDs. Maps remove+add in a
-            // single load would leak a stale cache entry under a count-only check, so verify the
-            // identity sequence matches.
+            // Identity check on actual Map references. uniqueID-based check would still pass
+            // when the engine reloads from save and produces fresh Map (and fresh AsyncTimeComp)
+            // instances with the same uniqueID — we'd return the previous world's tickable
+            // and route commands to a disposed object. ReferenceEquals catches that.
             bool identityMatch = tickableLookupKey.Length == maps.Count;
             if (identityMatch)
             {
                 for (int i = 0; i < maps.Count; i++)
                 {
-                    if (tickableLookupKey[i] != maps[i].uniqueID)
+                    if (!ReferenceEquals(tickableLookupKey[i], maps[i]))
                     {
                         identityMatch = false;
                         break;
@@ -458,11 +471,11 @@ namespace Multiplayer.Client
             {
                 tickableLookup.Clear();
                 tickableLookup[Multiplayer.AsyncWorldTime.TickableId] = Multiplayer.AsyncWorldTime;
-                var newKey = new int[maps.Count];
+                var newKey = new Map[maps.Count];
                 for (int i = 0; i < maps.Count; i++)
                 {
                     var map = maps[i];
-                    newKey[i] = map.uniqueID;
+                    newKey[i] = map;
                     var atc = map.AsyncTime();
                     tickableLookup[atc.TickableId] = atc;
                 }

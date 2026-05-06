@@ -198,6 +198,23 @@ namespace Multiplayer.Client
 
             OnMainThread.Enqueue(() =>
             {
+                // Pre-reload superseded check. By the time this lambda runs, a newer MapResponse
+                // for the same mapId may have arrived and overwritten dataSnapshot[mapId]. We
+                // do NOT want Loader.ReloadGame to fire for the older transferId because:
+                //   1. The reload itself is the expensive, side-effecting step (it calls into
+                //      ClearAllMapsAndWorld, scribes, runs PostLoad — flipping asyncTime, etc).
+                //   2. The newer response will queue its own reload; running both in sequence
+                //      double-loads and risks intermediate UI flicker and tick re-entry.
+                // The callback below is a second line of defense for the rarer case where a
+                // newer response arrives DURING the reload itself (after this gate but before
+                // the post-load callback runs).
+                if (Multiplayer.session.pendingMapTransferIds.TryGetValue(mapId, out var preReloadCurrent)
+                    && preReloadCurrent != capturedTransferId)
+                {
+                    MpLog.Log($"MapResponse(mapId={mapId}, transferId={capturedTransferId}) superseded by {preReloadCurrent} before reload; skipping load");
+                    return;
+                }
+
                 var mapsToLoad = Find.Maps.Select(m => m.uniqueID).Append(mapId).Distinct().ToList();
                 // Use the customPostLoadAction overload: it runs after Loader.PostLoad on the main
                 // thread, which is when the new map is in Find.Maps and dispatchable by
@@ -208,13 +225,13 @@ namespace Multiplayer.Client
                     if (forceAsyncTime) Multiplayer.game.gameComp.asyncTime = true;
                     if (Multiplayer.Client == null) return;
 
-                    // Superseded check: a newer MapResponse arrived while this load was queued.
-                    // The newer load will execute next and emit its own ack; emitting one for
-                    // this older transferId now would race the buffered-cmd drain on the server.
+                    // Second defense layer: a newer MapResponse arrived DURING the reload (after
+                    // the pre-reload check above). The newer load will execute next and emit its
+                    // own ack; emitting one here would race the server's buffered-cmd drain.
                     if (Multiplayer.session.pendingMapTransferIds.TryGetValue(mapId, out var current)
                         && current != capturedTransferId)
                     {
-                        MpLog.Log($"MapResponse(mapId={mapId}, transferId={capturedTransferId}) superseded by {current}; skipping ack");
+                        MpLog.Log($"MapResponse(mapId={mapId}, transferId={capturedTransferId}) superseded by {current} during reload; skipping ack");
                         return;
                     }
 

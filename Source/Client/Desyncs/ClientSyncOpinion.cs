@@ -38,6 +38,24 @@ namespace Multiplayer.Client
 
         public string CheckForDesync(ClientSyncOpinion other)
         {
+            // Comparison is split into two scopes:
+            //   GLOBAL — must be identical across all peers regardless of which maps they have
+            //            streamed in. roundMode, canonicalFingerprint (already streaming-safe
+            //            per its own design), worldRandomStates, commandRandomStates (now only
+            //            populated for world-scoped cmds — map-scoped cmds route into mapStates
+            //            via TryAddMapCommandRandomState). These all SequenceEqual cleanly.
+            //   PER-MAP — compared only on the intersection of mapIds present in both opinions.
+            //             A peer in world view, a peer on map 5, and an arbiter with nothing
+            //             streamed are all "in sync" with valid server state — comparing the
+            //             whole mapStates list flat (or even just the mapId lists) creates
+            //             false desyncs as soon as opinions are exchanged.
+            //
+            // desyncStackTraceHashes is intentionally NOT load-bearing here. Traces are
+            // recorded on every Rand.PushState/PopState across both world ticks and per-map
+            // ticks; in streaming, the per-map ticks contribute scope-specific hashes that
+            // a peer without that map loaded simply doesn't generate. Trace hashes are still
+            // shipped on the wire and used by FindTraceHashesDiffTick in SyncCoordinator after
+            // a desync is detected through other means, to locate the divergence point.
             if (roundMode != other.roundMode)
                 return $"FP round mode doesn't match: {roundMode} != {other.roundMode}";
 
@@ -49,28 +67,37 @@ namespace Multiplayer.Client
                 && canonicalFingerprint != other.canonicalFingerprint)
                 return $"Canonical fingerprint mismatch: 0x{canonicalFingerprint:X16} vs 0x{other.canonicalFingerprint:X16}";
 
-            if (!mapStates.Select(m => m.mapId).SequenceEqual(other.mapStates.Select(m => m.mapId)))
-                return "Map instances don't match";
-
-            foreach (var g in
-                     from map1 in mapStates
-                     join map2 in other.mapStates on map1.mapId equals map2.mapId
-                     select (map1, map2))
-            {
-                if (!g.map1.randomStates.SequenceEqual(g.map2.randomStates))
-                    return $"Wrong random state on map {g.map1.mapId}";
-            }
-
             if (!worldRandomStates.SequenceEqual(other.worldRandomStates))
                 return "Wrong random state for the world";
 
+            // Global cmds only after the per-map split. If two peers disagree here, they
+            // disagreed on a globally-broadcast command — every peer sees those, so this is a
+            // true desync irrespective of streaming.
             if (!commandRandomStates.SequenceEqual(other.commandRandomStates))
                 return "Random state from commands doesn't match";
 
-            if (!simulating && !other.simulating && desyncStackTraceHashes.Any() && other.desyncStackTraceHashes.Any() && !desyncStackTraceHashes.SequenceEqual(other.desyncStackTraceHashes))
-                return "Trace hashes don't match";
+            // Per-map intersection. Build a quick lookup from the other opinion so we don't
+            // scan its list for every entry on our side.
+            Dictionary<int, List<uint>> otherByMapId = null;
+            for (int i = 0; i < mapStates.Count; i++)
+            {
+                var localMap = mapStates[i];
+                otherByMapId ??= BuildMapStateLookup(other);
+                if (!otherByMapId.TryGetValue(localMap.mapId, out var otherStates))
+                    continue; // peer didn't have this map streamed in — nothing to compare
+                if (!localMap.randomStates.SequenceEqual(otherStates))
+                    return $"Wrong random state on map {localMap.mapId}";
+            }
 
             return null;
+        }
+
+        private static Dictionary<int, List<uint>> BuildMapStateLookup(ClientSyncOpinion op)
+        {
+            var dict = new Dictionary<int, List<uint>>(op.mapStates.Count);
+            for (int i = 0; i < op.mapStates.Count; i++)
+                dict[op.mapStates[i].mapId] = op.mapStates[i].randomStates;
+            return dict;
         }
 
         public List<uint> GetRandomStatesForMap(int mapId)
