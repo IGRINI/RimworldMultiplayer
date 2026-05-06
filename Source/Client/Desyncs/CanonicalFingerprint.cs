@@ -6,50 +6,42 @@ using Verse;
 
 namespace Multiplayer.Client.Desyncs;
 
-// Layered fingerprint of game state combined every 30 ticks alongside the existing RNG/trace
-// opinion in ClientSyncOpinion. Random states already cover behavioural drift; this catches
-// the structural cases random states can't see (a peer silently lost a faction, a map id
-// disappeared, a thing count diverged) so a desync surfaces with a categorical message instead
-// of just "trace hashes don't match" hundreds of ticks later.
+// World-level fingerprint combined every 30 ticks alongside the existing RNG/trace opinion in
+// ClientSyncOpinion. Random states already cover behavioural drift; this catches structural
+// world-state cases random states can't see (a peer silently lost a faction, world clock
+// drifted) so a desync surfaces with a categorical message instead of just "trace hashes
+// don't match" hundreds of ticks later.
 //
-// Components MUST be deterministic across processes and identical between in-sync peers:
-// FNV-1a 64 from StableHash, and every collection is iterated in id-sorted order — never
-// dictionary insertion order, which is process-dependent.
+// CRITICAL CORRECTNESS RULE: every component must be IDENTICAL between two in-sync peers
+// REGARDLESS of which maps they have loaded. Standalone map streaming is allowed to keep
+// different loaded-map subsets per client (one player on map 5, another in world view, an
+// arbiter with nothing streamed) — they're all "in sync". Anything that varies with the
+// loaded-map subset (Find.Maps.Count, per-map pawn/thing counts, lazy-inflated map state)
+// MUST NOT enter this hash. Per-map fingerprints belong in a separate intersection-compared
+// dictionary, not here. Same goes for receive-side counters (receivedCmds): a peer can have
+// already received a future cmd that hasn't executed yet while another receives it a moment
+// later, both in-sync at the same simulation tick.
+//
+// Components MUST be deterministic across processes: FNV-1a 64 from StableHash; every
+// collection iterated in id-sorted order — never dictionary insertion order.
 public static class CanonicalFingerprint
 {
     public static ulong Compute()
     {
-        // World tick first so a divergence in world clock surfaces at the top of the layered
-        // hash. Read once and reuse — Multiplayer.AsyncWorldTime.worldTicks is a plain int
-        // field, no allocation.
-        ulong hash = StableHash.String("canonical-v1");
+        // Format tag — bump if components change so a mid-rollout opinion exchange can't
+        // produce a false hash match between old and new builds.
+        ulong hash = StableHash.String("canonical-v2");
+
+        // World tick. Multiplayer.AsyncWorldTime.worldTicks is the simulation clock that drives
+        // every peer; a divergence here is the clearest possible structural desync.
         hash = StableHash.Combine(hash, MixUInt64((ulong)(uint)Multiplayer.AsyncWorldTime.worldTicks));
 
-        // Map ids in canonical order: sort by uniqueID, never trust list-natural order.
-        var maps = Find.Maps;
-        var sortedMaps = maps != null
-            ? maps.OrderBy(m => m.uniqueID).ToList()
-            : new List<Map>();
-
-        hash = StableHash.Combine(hash, MixUInt64((ulong)(uint)sortedMaps.Count));
-
-        // Per-map cheap proxies. Avoid LINQ inside the loop — sortedMaps is already realised
-        // and we only need indexed access.
-        for (int i = 0; i < sortedMaps.Count; i++)
-        {
-            var map = sortedMaps[i];
-            hash = StableHash.Combine(hash, MixUInt64((ulong)(uint)map.uniqueID));
-            hash = StableHash.Combine(hash, MixUInt64((ulong)(uint)map.mapPawns.AllPawns.Count));
-            hash = StableHash.Combine(hash, MixUInt64((ulong)(uint)map.listerThings.AllThings.Count));
-        }
-
-        // Factions: count + (id, defName) tuples in id order. defName is FNV-1a hashed so a
-        // mod-renamed faction surfaces as a fingerprint diff rather than only at faction-data
-        // serialization time.
+        // Factions are world-level state — replicated to every client regardless of which maps
+        // are streamed in. Count + (loadID, defName) tuples in loadID order. defName is hashed
+        // so a mod-renamed faction surfaces here rather than only at faction-data serialization.
         var factions = Find.FactionManager?.AllFactionsListForReading;
         if (factions != null)
         {
-            // Snapshot to a local sorted array so we don't allocate inside the inner loop.
             var sortedFactions = factions.OrderBy(f => f.loadID).ToList();
             hash = StableHash.Combine(hash, MixUInt64((ulong)(uint)sortedFactions.Count));
             for (int i = 0; i < sortedFactions.Count; i++)
@@ -63,12 +55,6 @@ public static class CanonicalFingerprint
         {
             hash = StableHash.Combine(hash, MixUInt64(0));
         }
-
-        // Command sequence head — a peer falling behind on receivedCmds would already trip
-        // command random-state mismatches, but folding it in lets the top-level fingerprint
-        // distinguish "real game-state divergence" from "I just haven't applied cmd N yet".
-        var session = Multiplayer.session;
-        hash = StableHash.Combine(hash, MixUInt64((ulong)(uint)(session?.receivedCmds ?? 0)));
 
         return hash;
     }
@@ -84,24 +70,6 @@ public static class CanonicalFingerprint
         {
             dict["worldTicks"] = (ulong)(uint)Multiplayer.AsyncWorldTime.worldTicks;
 
-            var maps = Find.Maps;
-            var sortedMaps = maps != null
-                ? maps.OrderBy(m => m.uniqueID).ToList()
-                : new List<Map>();
-            dict["mapCount"] = (ulong)(uint)sortedMaps.Count;
-
-            ulong mapsAcc = StableHash.String("maps");
-            for (int i = 0; i < sortedMaps.Count; i++)
-            {
-                var map = sortedMaps[i];
-                mapsAcc = StableHash.Combine(mapsAcc, MixUInt64((ulong)(uint)map.uniqueID));
-                mapsAcc = StableHash.Combine(mapsAcc, MixUInt64((ulong)(uint)map.mapPawns.AllPawns.Count));
-                mapsAcc = StableHash.Combine(mapsAcc, MixUInt64((ulong)(uint)map.listerThings.AllThings.Count));
-                dict[$"map{map.uniqueID}.pawns"] = (ulong)(uint)map.mapPawns.AllPawns.Count;
-                dict[$"map{map.uniqueID}.things"] = (ulong)(uint)map.listerThings.AllThings.Count;
-            }
-            dict["mapsHash"] = mapsAcc;
-
             var factions = Find.FactionManager?.AllFactionsListForReading;
             if (factions != null)
             {
@@ -116,9 +84,6 @@ public static class CanonicalFingerprint
                 }
                 dict["factionsHash"] = factionsAcc;
             }
-
-            var session = Multiplayer.session;
-            dict["receivedCmds"] = (ulong)(uint)(session?.receivedCmds ?? 0);
         }
         catch (Exception e)
         {

@@ -461,8 +461,12 @@ public class StandaloneMapStreamingEnabledTest
         player.inFlightMapIds.Should().BeEmpty();
         player.pendingMapCmds.Should().BeEmpty();
         player.pendingBufferOverflowed.Should().BeFalse();
-        player.mapTransferIds.Should().BeEmpty(
-            "rejoin must clear transferId generations so a stale ack from a prior transfer can't drain the new buffer");
+        // mapTransferIds is intentionally NOT cleared on rejoin: the generation namespace must
+        // stay monotonic across the connection lifetime so a delayed ack from before the rejoin
+        // can never match the post-rejoin generation. Clearing here would let an old K=1 ack
+        // drain a new K=1 transfer's buffer.
+        player.mapTransferIds.Should().ContainKey(5).WhoseValue.Should().Be(3);
+        player.mapTransferIds.Should().ContainKey(7).WhoseValue.Should().Be(1);
         // sentCmdsCount: SendWorldData (synchronous on the loading state's async machine) re-seeds
         // it from the SentCmds baseline; ResetTimeVotes then sends one cmd through the streaming
         // branch which lands on the just-rejoined player. The invariant we care about is that
@@ -820,6 +824,43 @@ public class StandaloneMapStreamingEnabledTest
         player.loadedMapIds.Should().Contain(5);
         player.pendingMapCmds.Should().BeEmpty();
         conn.SentPackets.Count(p => p == Packets.Server_Command).Should().Be(commandsBefore + bufferedBefore);
+    }
+
+    [Test]
+    public void Streaming_TransferIds_StayMonotonicAcrossRejoin()
+    {
+        // Regression: HandleRejoin used to call mapTransferIds.Clear(), which made the next
+        // SendMapResponse for that mapId reuse generation 1. A delayed Client_MapLoaded(mapId, 1)
+        // from before the rejoin would then match the new transfer and drain its pending buffer.
+        // Generations must stay strictly monotonic for the lifetime of the connection.
+        server.worldData.mapData[5] = new byte[] { 9 };
+        var (player, conn) = AddPlayer("p", -1, hasReportedCurrentMap: false);
+        var state = player.conn.GetState<ServerPlayingState>()!;
+
+        // Build up a non-trivial generation pre-rejoin.
+        state.HandleClientCommand(new ClientCommandPacket(
+            CommandType.PlayerCount, ScheduledCommand.Global, ByteWriter.GetBytes(-1, 5)));
+        player.mapTransferIds[5].Should().Be(1);
+        player.inFlightMapIds.Clear();
+        server.SendMapResponse(player, 5);
+        player.mapTransferIds[5].Should().Be(2);
+
+        // Rejoin clears load/in-flight/buffer state but MUST NOT reset the generation namespace.
+        state.HandleRejoin(new ByteReader(Array.Empty<byte>()));
+        player.mapTransferIds.Should().ContainKey(5, "rejoin must preserve the per-mapId generation counter");
+        player.mapTransferIds[5].Should().Be(2,
+            "rejoin must preserve the existing generation so the next SendMapResponse advances to 3");
+
+        // After rejoin, drive the loading-state path (which now also doesn't clear) and stream
+        // the map again. The new generation must be strictly greater than any pre-rejoin value.
+        var loadingState = new ServerLoadingState(player.conn);
+        loadingState.SendWorldData();
+        player.mapTransferIds[5].Should().Be(2,
+            "SendWorldData must preserve the generation namespace too");
+
+        player.inFlightMapIds.Clear();
+        server.SendMapResponse(player, 5);
+        player.mapTransferIds[5].Should().Be(3, "post-rejoin SendMapResponse must advance the generation");
     }
 
     [Test]

@@ -51,10 +51,15 @@ namespace Multiplayer.Common
             // the streaming mirror or the server keeps thinking those maps are loaded — the next
             // PlayerCount on such a map would skip MapResponse and route map-scoped cmds to a
             // client that has no map data again. Counter and buffer get re-seeded by SendWorldData.
+            //
+            // mapTransferIds is intentionally NOT cleared. Generations must stay monotonic across
+            // the connection lifetime so a delayed Client_MapLoaded(mapId, K) from before the
+            // rejoin can never match the post-rejoin generation (which is strictly K+1 or
+            // greater). Clearing here would let an old K=1 ack drain the pending buffer of a new
+            // K=1 transfer — the bug the generation was supposed to prevent.
             Player.loadedMapIds.Clear();
             Player.inFlightMapIds.Clear();
             Player.pendingMapCmds.Clear();
-            Player.mapTransferIds.Clear();
             Player.pendingBufferOverflowed = false;
             Player.sentCmdsCount = 0;
 
@@ -77,9 +82,17 @@ namespace Multiplayer.Common
         // peer for post-mortem diff. No host round-trip — the server already holds the gzipped
         // save in memory from the last Client_WorldDataUpload. Empty array if nothing cached
         // yet (early-session desync); the client side handles the empty case gracefully.
+        //
+        // Gated on PlayerStatus.Desynced + a long per-player cooldown: the payload is the entire
+        // world save (potentially many MB) and a healthy client has no business asking for it.
+        // Without these gates a client could spam the request and force the server to fragment
+        // the save out repeatedly.
         [TypedPacketHandler]
         public void HandleRequestHostSave(ClientRequestHostSavePacket _)
         {
+            if (Player.status != PlayerStatus.Desynced) return;
+            if (!Player.RateLimitAllow("hostSave", MultiplayerServer.NetTicksPerSecond * 30)) return;
+
             var saved = Server.worldData?.savedGame ?? System.Array.Empty<byte>();
             Player.SendPacket(new ServerHostSaveTransferPacket(saved));
         }

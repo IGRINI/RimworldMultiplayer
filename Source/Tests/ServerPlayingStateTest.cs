@@ -387,6 +387,40 @@ public class ServerPlayingStateTest
             "first selected fans out to playing players (excluding sender); second is rate-limited");
     }
 
+    [Test]
+    public void HostSave_DroppedWhenPlayerNotDesynced()
+    {
+        // The host save blob is potentially MB-sized. Healthy clients have no business asking
+        // for it; the handler must reject when the player isn't actually marked Desynced.
+        var aliceConn = (RecordingConnection)alice.conn;
+        aliceConn.SentPackets.Clear();
+        var state = alice.conn.GetState<ServerPlayingState>()!;
+        alice.status.Should().NotBe(PlayerStatus.Desynced);
+
+        state.HandleRequestHostSave(new ClientRequestHostSavePacket());
+
+        aliceConn.SentPackets.Should().NotContain(Packets.Server_HostSaveTransfer,
+            "non-desynced players must not pull the host save");
+    }
+
+    [Test]
+    public void HostSave_RateLimitedAcrossRepeatedRequests()
+    {
+        // Even after a desync, repeated requests must be cooldown'd. Without this a desynced
+        // client can spam the request and force the server to fragment-send the save every time.
+        var aliceConn = (RecordingConnection)alice.conn;
+        aliceConn.SentPackets.Clear();
+        var state = alice.conn.GetState<ServerPlayingState>()!;
+        alice.status = PlayerStatus.Desynced;
+
+        state.HandleRequestHostSave(new ClientRequestHostSavePacket());
+        state.HandleRequestHostSave(new ClientRequestHostSavePacket());
+        state.HandleRequestHostSave(new ClientRequestHostSavePacket());
+
+        aliceConn.SentPackets.Count(p => p == Packets.Server_HostSaveTransfer).Should().Be(1,
+            "first request fires; subsequent ones are rate-limited within the cooldown window");
+    }
+
     private static ByteReader BuildWorldUpload(int maps, byte[]? savedGame = null, byte[]? sessionData = null)
     {
         var w = new ByteWriter();

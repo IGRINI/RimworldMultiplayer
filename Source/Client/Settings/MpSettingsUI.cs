@@ -108,6 +108,9 @@ public static class MpSettingsUI
 
         // Section 8: opt-in auto-rejoin. Off by default — rejoin throws away the local sim and
         // silent recovery has historically hidden real determinism bugs. Hand the user the choice.
+        // Translation keys MpAutoRejoinOnDesync / MpAutoRejoinOnDesyncDesc need to be added to the
+        // separate Multiplayer-Locale repo (the Languages/ folder is a submodule). Until that
+        // lands the toggle shows the raw key — same pattern as every other untranslated MP string.
         listing.CheckboxLabeled("MpAutoRejoinOnDesync".Translate(), ref settings.autoRejoinOnDesync,
             "MpAutoRejoinOnDesyncDesc".Translate());
 

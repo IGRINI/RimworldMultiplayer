@@ -4,6 +4,7 @@ using System.Linq;
 using Ionic.Zlib;
 using Multiplayer.Client.Desyncs;
 using Multiplayer.Client.Saving;
+using Multiplayer.Client.Util;
 using Multiplayer.Common;
 using Multiplayer.Common.Networking.Packet;
 using RimWorld;
@@ -160,6 +161,22 @@ namespace Multiplayer.Client
             int snapshotCommandSeq = data.ReadInt32();
             _ = snapshotCommandSeq;
 
+            // Drop late MapResponses whose transferId is older than (or equal to) the latest one
+            // we've already accepted for this map. Without this, a delayed transfer-1 response
+            // arriving after we've started processing transfer-2 would overwrite dataSnapshot and
+            // queue a second Loader.ReloadGame; the ack would be discarded server-side (good) but
+            // the client would have already reloaded stale data (bad). The fix is to refuse the
+            // stale response BEFORE mutating any session state.
+            if (Multiplayer.session.pendingMapTransferIds.TryGetValue(mapId, out var latestTransferId)
+                && transferId <= latestTransferId)
+            {
+                MpLog.Log($"Ignoring stale MapResponse(mapId={mapId}, transferId={transferId}); already at {latestTransferId}");
+                int skipMapCmdsLen = data.ReadInt32();
+                for (int j = 0; j < skipMapCmdsLen; j++) data.ReadPrefixedBytes();
+                data.ReadPrefixedBytes();
+                return;
+            }
+
             int mapCmdsLen = data.ReadInt32();
             List<ScheduledCommand> mapCmds = new List<ScheduledCommand>(mapCmdsLen);
             for (int j = 0; j < mapCmdsLen; j++)
@@ -173,6 +190,11 @@ namespace Multiplayer.Client
 
             // Capture the asyncTime flag now (main thread reads happen later inside the lambda).
             bool forceAsyncTime = Multiplayer.game?.gameComp.asyncTime ?? false;
+            // Capture the transferId for this load. If a newer MapResponse for the same mapId
+            // arrives before our queued ReloadGame runs, pendingMapTransferIds[mapId] will have
+            // moved on; the callback below detects that and skips both the ack and any side
+            // effects — the newer load will issue its own ack.
+            int capturedTransferId = transferId;
 
             OnMainThread.Enqueue(() =>
             {
@@ -184,8 +206,19 @@ namespace Multiplayer.Client
                 Loader.ReloadGame(mapsToLoad, false, () =>
                 {
                     if (forceAsyncTime) Multiplayer.game.gameComp.asyncTime = true;
-                    if (Multiplayer.Client != null)
-                        Multiplayer.Client.Send(new ClientMapLoadedPacket(mapId, transferId));
+                    if (Multiplayer.Client == null) return;
+
+                    // Superseded check: a newer MapResponse arrived while this load was queued.
+                    // The newer load will execute next and emit its own ack; emitting one for
+                    // this older transferId now would race the buffered-cmd drain on the server.
+                    if (Multiplayer.session.pendingMapTransferIds.TryGetValue(mapId, out var current)
+                        && current != capturedTransferId)
+                    {
+                        MpLog.Log($"MapResponse(mapId={mapId}, transferId={capturedTransferId}) superseded by {current}; skipping ack");
+                        return;
+                    }
+
+                    Multiplayer.Client.Send(new ClientMapLoadedPacket(mapId, capturedTransferId));
                 });
             });
         }

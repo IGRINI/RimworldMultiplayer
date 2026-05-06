@@ -53,11 +53,9 @@ public class ServerLoadingState : AsyncConnectionState
         if (Server.IsStandaloneServer)
             Player.sentCmdsCount = sentCmdsSnapshot;
 
-        // Clear any per-mapId transfer generations from a prior session on this player. Mirrors
-        // the streaming-state reset in HandleRejoin: after this point any acks referencing an old
-        // generation are silently dropped by HandleMapLoaded, since the new generation starts at 1
-        // on the first SendMapResponse after the (re)join.
-        Player.mapTransferIds.Clear();
+        // mapTransferIds is intentionally NOT cleared here either. The generation namespace must
+        // stay monotonic across the lifetime of this player connection — see comment in
+        // HandleRejoin. A fresh ServerPlayer (first join) starts with an empty dict naturally.
 
         writer.WriteInt32(Player.FactionId);
         writer.WriteInt32(Server.gameTimer);

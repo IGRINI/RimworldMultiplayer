@@ -82,12 +82,14 @@ namespace Multiplayer.Client
             }
         }
 
-        // O(1) id lookup. Maps are added/removed during play, but we don't hook every mutation
-        // site; instead we rebuild the cache when Find.Maps.Count changes. A same-count remove+add
-        // in the same frame would leak a stale entry, but RimWorld doesn't do that at the
-        // resolution we care about. Reset() also clears the cache so a session reload starts fresh.
+        // O(1) id lookup. Cache is keyed on the actual sequence of map uniqueIDs, not just the
+        // count. Streaming reload, Rejoiner.DoRejoin, and replay scrubbing can swap maps without
+        // changing Find.Maps.Count — keying on count alone returns stale AsyncTimeComp instances
+        // and routes commands to ghosts. The per-call sentinel walk is N int comparisons (N≤~10
+        // in practice), still much cheaper than the original FirstOrDefault+lambda. Reset() clears
+        // the cache so a session reload starts fresh.
         private static readonly Dictionary<int, ITickable> tickableLookup = new();
-        private static int tickableLookupMapCount = -1;
+        private static int[] tickableLookupKey = Array.Empty<int>();
 
         static Stopwatch updateTimer = Stopwatch.StartNew();
         public static Stopwatch tickTimer = Stopwatch.StartNew();
@@ -425,7 +427,7 @@ namespace Multiplayer.Client
             realTime = 0;
             deferredCmds.Clear();
             tickableLookup.Clear();
-            tickableLookupMapCount = -1;
+            tickableLookupKey = Array.Empty<int>();
             TimeControlPatch.prePauseTimeSpeed = null;
             RoundMode.Reset();
         }
@@ -435,16 +437,36 @@ namespace Multiplayer.Client
         public static ITickable TickableById(int tickableId)
         {
             var maps = Find.Maps;
-            if (tickableLookupMapCount != maps.Count)
+
+            // Identity check: same length AND same sequence of uniqueIDs. Maps remove+add in a
+            // single load would leak a stale cache entry under a count-only check, so verify the
+            // identity sequence matches.
+            bool identityMatch = tickableLookupKey.Length == maps.Count;
+            if (identityMatch)
+            {
+                for (int i = 0; i < maps.Count; i++)
+                {
+                    if (tickableLookupKey[i] != maps[i].uniqueID)
+                    {
+                        identityMatch = false;
+                        break;
+                    }
+                }
+            }
+
+            if (!identityMatch)
             {
                 tickableLookup.Clear();
                 tickableLookup[Multiplayer.AsyncWorldTime.TickableId] = Multiplayer.AsyncWorldTime;
+                var newKey = new int[maps.Count];
                 for (int i = 0; i < maps.Count; i++)
                 {
-                    var atc = maps[i].AsyncTime();
+                    var map = maps[i];
+                    newKey[i] = map.uniqueID;
+                    var atc = map.AsyncTime();
                     tickableLookup[atc.TickableId] = atc;
                 }
-                tickableLookupMapCount = maps.Count;
+                tickableLookupKey = newKey;
             }
             return tickableLookup.GetValueOrDefault(tickableId);
         }
