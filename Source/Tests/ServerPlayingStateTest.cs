@@ -226,6 +226,167 @@ public class ServerPlayingStateTest
         server.worldData.savedGame.Should().BeSameAs(beforeSavedGame);
     }
 
+    [Test]
+    public void WorldDataUpload_RejectsNegativeMapId()
+    {
+        // Negative ids are reserved sentinels and never name a real map; accepting them would let a
+        // client poison worldData.mapData with keys that downstream lookups never expect.
+        var w = new ByteWriter();
+        w.WriteInt32(1);
+        w.WriteInt32(-5);
+        w.WritePrefixedBytes(new byte[] { 1 });
+        w.WritePrefixedBytes(Array.Empty<byte>());
+        w.WritePrefixedBytes(Array.Empty<byte>());
+        var reader = new ByteReader(w.ToArray());
+
+        Action act = () => host.conn.GetState<ServerPlayingState>()!.HandleWorldDataUpload(reader);
+
+        act.Should().Throw<ReaderException>().WithMessage("*Negative mapId*");
+    }
+
+    [Test]
+    public void WorldDataUpload_RejectsDuplicateMapId()
+    {
+        // Duplicate ids would silently overwrite the first map's bytes; reject at parse time.
+        var w = new ByteWriter();
+        w.WriteInt32(2);
+        w.WriteInt32(3); w.WritePrefixedBytes(new byte[] { 1 });
+        w.WriteInt32(3); w.WritePrefixedBytes(new byte[] { 2 });
+        w.WritePrefixedBytes(Array.Empty<byte>());
+        w.WritePrefixedBytes(Array.Empty<byte>());
+        var reader = new ByteReader(w.ToArray());
+
+        Action act = () => host.conn.GetState<ServerPlayingState>()!.HandleWorldDataUpload(reader);
+
+        act.Should().Throw<ReaderException>().WithMessage("*Duplicate mapId*");
+    }
+
+    // ---------- HandleChat ----------
+
+    [Test]
+    public void Chat_DropsMessageOverLengthCap()
+    {
+        // Length cap drops the message — no chat broadcast, no disconnect. AfterTrim is what gets
+        // measured: surrounding whitespace can't be used to bypass the cap.
+        ClearSentPackets();
+
+        var tooLong = new string('a', ServerPlayingState.MaxChatMsgLength + 1);
+        alice.conn.GetState<ServerPlayingState>()!.HandleChat(new ClientChatPacket { msg = tooLong });
+
+        SentPacketsAcrossAllPlayers().Should().NotContain(Packets.Server_Chat);
+    }
+
+    [Test]
+    public void Chat_AllowsMessageAtExactCap()
+    {
+        ClearSentPackets();
+
+        var atCap = new string('a', ServerPlayingState.MaxChatMsgLength);
+        alice.conn.GetState<ServerPlayingState>()!.HandleChat(new ClientChatPacket { msg = atCap });
+
+        SentPacketsAcrossAllPlayers().Should().Contain(Packets.Server_Chat);
+    }
+
+    // ---------- HandleFrameTime ----------
+
+    [Test]
+    public void FrameTime_ClampsNaN()
+    {
+        // NaN must never reach Player.frameTime; the downstream maxFrameTime scan would propagate it.
+        alice.conn.GetState<ServerPlayingState>()!
+            .HandleFrameTime(new ClientFrameTimePacket(float.NaN));
+
+        alice.frameTime.Should().Be(MultiplayerServer.StandardTimePerTick);
+    }
+
+    [Test]
+    public void FrameTime_ClampsPositiveInfinity()
+    {
+        alice.conn.GetState<ServerPlayingState>()!
+            .HandleFrameTime(new ClientFrameTimePacket(float.PositiveInfinity));
+
+        alice.frameTime.Should().Be(MultiplayerServer.StandardTimePerTick * 4f);
+    }
+
+    [Test]
+    public void FrameTime_ClampsHugeFiniteValue()
+    {
+        alice.conn.GetState<ServerPlayingState>()!
+            .HandleFrameTime(new ClientFrameTimePacket(1e9f));
+
+        alice.frameTime.Should().Be(MultiplayerServer.StandardTimePerTick * 4f);
+    }
+
+    [Test]
+    public void FrameTime_ClampsBelowMin()
+    {
+        alice.conn.GetState<ServerPlayingState>()!
+            .HandleFrameTime(new ClientFrameTimePacket(-1f));
+
+        alice.frameTime.Should().Be(MultiplayerServer.StandardTimePerTick);
+    }
+
+    [Test]
+    public void FrameTime_PassesValidValueThrough()
+    {
+        var ok = MultiplayerServer.StandardTimePerTick * 1.5f;
+        alice.conn.GetState<ServerPlayingState>()!
+            .HandleFrameTime(new ClientFrameTimePacket(ok));
+
+        alice.frameTime.Should().Be(ok);
+    }
+
+    // ---------- Per-class rate limits ----------
+
+    [Test]
+    public void RateLimit_PingDropsBurstWithinInterval()
+    {
+        // Two pings back-to-back at the same NetTimer must collapse to a single broadcast — the
+        // second one returns early before SendToPlaying.
+        ClearSentPackets();
+        var state = alice.conn.GetState<ServerPlayingState>()!;
+
+        state.HandlePing(new ClientPingLocPacket());
+        state.HandlePing(new ClientPingLocPacket());
+
+        var pings = SentPacketsAcrossAllPlayers().Count(p => p == Packets.Server_PingLocation);
+        pings.Should().Be(server.playerManager.Players.Count(),
+            "first ping fans out to all playing players; second is rate-limited");
+    }
+
+    [Test]
+    public void RateLimit_FreezeDropsRapidToggle()
+    {
+        // Freeze flips state — the first call commits, the rapid follow-up must NOT toggle back.
+        var state = alice.conn.GetState<ServerPlayingState>()!;
+        alice.frozen = false;
+
+        state.HandleFreeze(new ClientFreezePacket(true));
+        alice.frozen.Should().BeTrue();
+
+        state.HandleFreeze(new ClientFreezePacket(false));
+        alice.frozen.Should().BeTrue("rapid follow-up is rate-limited; the unfreeze must not land");
+    }
+
+    [Test]
+    public void RateLimit_SelectedDropsBurstWithinInterval()
+    {
+        ClearSentPackets();
+        var state = alice.conn.GetState<ServerPlayingState>()!;
+        var packet = new ClientSelectedPacket
+        {
+            newlySelectedIds = Array.Empty<int>(),
+            unselectedIds = Array.Empty<int>(),
+        };
+
+        state.HandleSelected(packet);
+        state.HandleSelected(packet);
+
+        var fanouts = SentPacketsAcrossAllPlayers().Count(p => p == Packets.Server_Selected);
+        fanouts.Should().Be(server.playerManager.Players.Count() - 1,
+            "first selected fans out to playing players (excluding sender); second is rate-limited");
+    }
+
     private static ByteReader BuildWorldUpload(int maps, byte[]? savedGame = null, byte[]? sessionData = null)
     {
         var w = new ByteWriter();

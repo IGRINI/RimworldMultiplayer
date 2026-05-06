@@ -50,6 +50,7 @@ public record struct SyncOpinion : IPacketBufferable
     public List<int> traceHashes;
     public bool simulating;
     public RoundModeEnum roundMode;
+    public ulong canonicalFingerprint;
 
     public void Bind(PacketBuffer buf)
     {
@@ -64,6 +65,8 @@ public record struct SyncOpinion : IPacketBufferable
 
         buf.Bind(ref simulating);
         buf.BindEnum(ref roundMode);
+        // Layered structural fingerprint, see CanonicalFingerprint.Compute().
+        buf.Bind(ref canonicalFingerprint);
     }
 }
 

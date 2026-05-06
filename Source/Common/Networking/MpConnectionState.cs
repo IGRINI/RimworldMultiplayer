@@ -17,6 +17,9 @@ namespace Multiplayer.Common
         // Server-side handler policy gates. Return true if the calling player is allowed
         // to invoke the handler. On false the caller is expected to silently return - the
         // project convention for policy violations is a quiet no-op, not a disconnect.
+        // todo: centralize authority policy — RequireHost / RequireArbiterOrHost / RequireDevMode
+        // are scattered across handlers; a dedicated policy layer would let us audit gates in one
+        // place and grow with future per-command rules. Out of scope for this pass.
         protected bool RequireHost() => Player.IsHost;
 
         // When the arbiter is connected and playing, only it produces authoritative

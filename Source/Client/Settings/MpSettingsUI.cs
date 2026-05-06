@@ -106,12 +106,22 @@ public static class MpSettingsUI
         if (VersionChecker.IsContinuousRelease || VersionChecker.IsLocalBuild)
             listing.CheckboxLabeled("MpIncludeReplayInDesync".Translate(), ref settings.includeReplayInDesync);
 
+        // Section 8: opt-in auto-rejoin. Off by default — rejoin throws away the local sim and
+        // silent recovery has historically hidden real determinism bugs. Hand the user the choice.
+        listing.CheckboxLabeled("MpAutoRejoinOnDesync".Translate(), ref settings.autoRejoinOnDesync,
+            "MpAutoRejoinOnDesyncDesc".Translate());
+
         if (Prefs.DevMode)
         {
             listing.CheckboxLabeled("Show debug info", ref settings.showDevInfo);
             listing.TextFieldNumericLabeled("Desync radius:  ", ref settings.desyncTracesRadius, ref desyncRadiusBuffer, 1f,
                 200f);
             listing.TextFieldNumericLabeled("Jitted methods:  ", ref settings.jittedMethodsInDesync, ref jittedMethodsBuffer);
+            // Section 8: when enabled, the desync report writer also runs SaveGameToDoc twice and
+            // diffs the two byte streams. Differences point at non-deterministic enumeration order
+            // or runtime hash codes leaking into the save XML. Save-twice is cheap; reload-twice
+            // would be ideal but reloading from inside a desync handler is a deadlock minefield.
+            listing.CheckboxLabeled("Heavy desync diagnostic (save twice + diff)", ref settings.heavyDiagnosticMode);
 
             if (MpVersion.IsDebug && FileAssoc.IsSupported())
             {

@@ -20,11 +20,16 @@ public abstract class ClientBaseState(ConnectionBase connection) : MpConnectionS
     [TypedPacketHandler]
     public void HandleTimeControl(ServerTimeControlPacket packet)
     {
-        if (Multiplayer.session.remoteTickUntil >= packet.tickUntil) return;
-
+        // Both fields advance independently. The old guard (`remoteTickUntil >= packet.tickUntil
+        // return`) silently dropped sentCmds updates whenever the tick window hadn't moved, which
+        // could leave ProcessTimeControl gated on a stale-low remoteSentCmds and freeze the sim
+        // even though the server had emitted more cmds. Update each monotonically so neither can
+        // regress.
         TickPatch.serverTimePerTick = packet.serverTimePerTick;
-        Multiplayer.session.remoteTickUntil = packet.tickUntil;
-        Multiplayer.session.remoteSentCmds = packet.sentCmds;
+        if (packet.tickUntil > Multiplayer.session.remoteTickUntil)
+            Multiplayer.session.remoteTickUntil = packet.tickUntil;
+        if (packet.sentCmds > Multiplayer.session.remoteSentCmds)
+            Multiplayer.session.remoteSentCmds = packet.sentCmds;
         Multiplayer.session.ProcessTimeControl();
     }
 

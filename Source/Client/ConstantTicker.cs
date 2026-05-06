@@ -18,7 +18,12 @@ namespace Multiplayer.Client
 
             try
             {
-                TickShipCountdown(); // todo control the RNG seed here?
+                // TickShipCountdown and TickNonSimulation are the only callers here. Neither
+                // currently invokes Rand on the deterministic path: TickShipCountdown does
+                // float decrement + vanilla CountdownEnded (no Rand), TickNonSimulation runs
+                // the sync coordinator and autosave. If a future change adds Rand usage to
+                // either, push/pop a deterministic seed (e.g. AsyncWorldTime.randState) here.
+                TickShipCountdown();
                 TickNonSimulation();
             }
             finally

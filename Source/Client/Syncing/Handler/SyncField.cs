@@ -65,6 +65,7 @@ namespace Multiplayer.Client
 
         public bool DoSyncCatch(object target, object value, object index = null)
         {
+            // todo SyncField apply errors should also trigger desync; gated until per-field error reporting exists
             try
             {
                 DoSync(target, value, index);

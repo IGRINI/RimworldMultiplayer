@@ -3,6 +3,9 @@
 [PacketDefinition(Packets.Server_Command)]
 public record struct ServerCommandPacket : IPacket
 {
+    // Per-recipient monotonic sequence. The client validates it equals its receivedCmds counter
+    // before processing — any gap, duplicate, or out-of-order packet is a fatal sync failure.
+    public int seq;
     public CommandType type;
     public int ticks;
     public int factionId;
@@ -10,8 +13,9 @@ public record struct ServerCommandPacket : IPacket
     public int playerId;
     public byte[] data;
 
-    public static ServerCommandPacket From(ScheduledCommand cmd) => new()
+    public static ServerCommandPacket From(ScheduledCommand cmd, int seq) => new()
     {
+        seq = seq,
         type = cmd.type,
         ticks = cmd.ticks,
         factionId = cmd.factionId,
@@ -25,6 +29,7 @@ public record struct ServerCommandPacket : IPacket
 
     public void Bind(PacketBuffer buf)
     {
+        buf.Bind(ref seq);
         buf.BindEnum(ref type);
         buf.Bind(ref ticks);
         buf.Bind(ref factionId);

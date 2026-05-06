@@ -181,7 +181,7 @@ namespace Multiplayer.Common
                             return null;
 
                         Type listObjType = type.GetGenericArguments()[0];
-                        IList list = (IList)Activator.CreateInstance(type, size);
+                        IList list = (IList)ConstructorCache.CreateList(listObjType, size);
 
                         for (int j = 0; j < size; j++)
                             list.Add(ReadSyncObject(data, listObjType));
@@ -228,7 +228,7 @@ namespace Multiplayer.Common
                     {
                         Type element = type.GetGenericArguments()[0];
                         object? list = ReadSyncObject(data, typeof(List<>).MakeGenericType(element));
-                        return list == null ? null : Activator.CreateInstance(typeof(HashSet<>).MakeGenericType(element), list);
+                        return list == null ? null : ConstructorCache.CreateHashSet(element, list);
                     }
 
                     if (genericTypeDefinition == typeof(ValueTuple<,>)) // Binary ValueTuple
@@ -395,7 +395,7 @@ namespace Multiplayer.Common
                             return;
                         }
 
-                        IList list = (IList)Activator.CreateInstance(listType);
+                        IList list = (IList)ConstructorCache.CreateInstance(listType);
 
                         foreach (var o in e)
                             list.Add(o);

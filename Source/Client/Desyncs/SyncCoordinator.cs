@@ -5,6 +5,7 @@ using Multiplayer.Client.Desyncs;
 using Multiplayer.Client.Util;
 using Multiplayer.Common;
 using Multiplayer.Common.Networking.Packet;
+using Multiplayer.Common.Util;
 using RimWorld;
 using Verse;
 
@@ -35,6 +36,23 @@ namespace Multiplayer.Client
         {
             if (!ShouldCollect || currentOpinion == null) return null;
             currentOpinion.roundMode = RoundMode.GetCurrentRoundMode();
+
+            // Compute structural fingerprint on the main thread (this is called from
+            // ConstantTicker.TickSyncCoordinator). Reading Find.Maps / Find.FactionManager
+            // outside the main thread is unsafe, so don't move this off-thread without
+            // also snapshotting the inputs first. A failure here MUST NOT crash the sync
+            // coordinator — zero is treated as "fingerprint not available" by CheckForDesync,
+            // which then falls back to the existing RNG/trace comparisons.
+            try
+            {
+                currentOpinion.canonicalFingerprint = CanonicalFingerprint.Compute();
+            }
+            catch (Exception e)
+            {
+                Log.Warning($"CanonicalFingerprint.Compute threw: {e}");
+                currentOpinion.canonicalFingerprint = 0;
+            }
+
             var opinion = currentOpinion;
             currentOpinion = null;
             return opinion;
@@ -133,6 +151,19 @@ namespace Multiplayer.Client
                 desyncMessage,
                 new SaveableDesyncInfo(this, local, remote, diffAt, found)
             ));
+
+            // Section 8 auto-rejoin opt-in. Window stays up; if the setting is on, rejoin fires
+            // after the report has had a chance to write. DesyncedWindow.WindowUpdate flushes the
+            // zip after at most maxWait (5s) — wait one more second on top so the file actually
+            // lands before MemoryUtility.ClearAllMapsAndWorld kicks in and the window is torn
+            // down. Set autosaveOnDesync (or whatever future flag) to write earlier without this
+            // wait if needed.
+            if (Multiplayer.settings.autoRejoinOnDesync)
+                OnMainThread.Schedule(static () =>
+                {
+                    if (Multiplayer.Client != null && Multiplayer.session != null && Multiplayer.session.desynced)
+                        Rejoiner.DoRejoin();
+                }, 6f);
         }
 
         private static int FindTraceHashesDiffTick(ClientSyncOpinion local, ClientSyncOpinion remote, out bool found)
@@ -200,7 +231,10 @@ namespace Multiplayer.Client
 
             OpinionInBuilding.TryMarkSimulating();
 
-            int hash = Gen.HashCombineInt(info1.GetHashCode(), info2.GetHashCode());
+            // Was string.GetHashCode() — randomised per process so it produced spurious
+            // desyncs when peers happened to disagree on the same string. StableHash is
+            // deterministic across processes/.NET versions.
+            int hash = Gen.HashCombineInt(StableHash.StringInt32(info1), StableHash.StringInt32(info2));
 
             OpinionInBuilding.desyncStackTraces.Add(new StackTraceLogItemObj {
                 tick = TickPatch.Timer,

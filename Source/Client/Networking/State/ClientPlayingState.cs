@@ -18,6 +18,17 @@ namespace Multiplayer.Client
         [TypedPacketHandler]
         public void HandleCommand(ServerCommandPacket packet)
         {
+            // Per-recipient seq enforcement. The server stamps a monotonic seq on every cmd packet
+            // emitted to this player; any gap, duplicate, or reorder is a protocol-level desync —
+            // simulating onward would silently diverge from peers. Halt and surface a window so
+            // the user gets an explicit signal and a rejoin path.
+            if (packet.seq != Multiplayer.session.receivedCmds)
+            {
+                Multiplayer.session.TriggerProtocolDesync(
+                    $"Command sequence gap: expected seq {Multiplayer.session.receivedCmds}, received {packet.seq} (cmdType={packet.type}, ticks={packet.ticks}, mapId={packet.mapId})");
+                return;
+            }
+
             Session.ScheduleCommand(packet.ToCommand());
             Multiplayer.session.receivedCmds++;
             Multiplayer.session.ProcessTimeControl();
@@ -139,6 +150,15 @@ namespace Multiplayer.Client
         public void HandleMapResponse(ByteReader data)
         {
             int mapId = data.ReadInt32();
+            // transferId is per-(player, mapId) generation; bumped server-side on every
+            // SendMapResponse for this mapId. Echo it back in ClientMapLoadedPacket so the server
+            // can discard stale acks from prior transfers (e.g. superseded by Rejoin or re-stream).
+            int transferId = data.ReadInt32();
+            // snapshotCommandSeq documents which player.sentCmdsCount baseline the snapshot's
+            // mapCmds were taken under. Currently not consumed by the client (snapshot cmds bypass
+            // HandleCommand → no seq enforcement) but kept on the wire for future verification.
+            int snapshotCommandSeq = data.ReadInt32();
+            _ = snapshotCommandSeq;
 
             int mapCmdsLen = data.ReadInt32();
             List<ScheduledCommand> mapCmds = new List<ScheduledCommand>(mapCmdsLen);
@@ -149,6 +169,7 @@ namespace Multiplayer.Client
 
             byte[] mapData = GZipStream.UncompressBuffer(data.ReadPrefixedBytes());
             Session.dataSnapshot.MapData[mapId] = mapData;
+            Multiplayer.session.pendingMapTransferIds[mapId] = transferId;
 
             // Capture the asyncTime flag now (main thread reads happen later inside the lambda).
             bool forceAsyncTime = Multiplayer.game?.gameComp.asyncTime ?? false;
@@ -164,7 +185,7 @@ namespace Multiplayer.Client
                 {
                     if (forceAsyncTime) Multiplayer.game.gameComp.asyncTime = true;
                     if (Multiplayer.Client != null)
-                        Multiplayer.Client.Send(new ClientMapLoadedPacket(mapId));
+                        Multiplayer.Client.Send(new ClientMapLoadedPacket(mapId, transferId));
                 });
             });
         }
@@ -187,6 +208,17 @@ namespace Multiplayer.Client
         {
             TickPatch.serverFrozen = packet.frozen;
             TickPatch.frozenAt = packet.gameTimer;
+        }
+
+        // Section 8: paired desync save. Server replies with the cached worldData snapshot when
+        // the desynced client requested it (DesyncedWindow ctor sends Client_RequestHostSave).
+        // Bytes go straight to the open window for inclusion in the desync zip; if the window has
+        // already closed (or never opened, e.g. a protocol desync that skipped the report path),
+        // we discard silently — there's nowhere to write.
+        [TypedPacketHandler]
+        public void HandleHostSaveTransfer(ServerHostSaveTransferPacket packet)
+        {
+            Find.WindowStack.WindowOfType<DesyncedWindow>()?.HandleHostSavedGame(packet.rawSavedGame);
         }
 
         [TypedPacketHandler]

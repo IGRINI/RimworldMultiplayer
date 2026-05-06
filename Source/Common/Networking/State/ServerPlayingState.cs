@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using Multiplayer.Common.Networking;
@@ -53,6 +54,7 @@ namespace Multiplayer.Common
             Player.loadedMapIds.Clear();
             Player.inFlightMapIds.Clear();
             Player.pendingMapCmds.Clear();
+            Player.mapTransferIds.Clear();
             Player.pendingBufferOverflowed = false;
             Player.sentCmdsCount = 0;
 
@@ -69,6 +71,17 @@ namespace Multiplayer.Common
         {
             if (!RequireHost()) return;
             Server.GetPlayer(packet.playerId)?.SendPacket(ServerTracesPacket.Transfer(packet.rawTraces, packet.rawJittedMethods));
+        }
+
+        // Section 8: send the cached host worldData snapshot back to the requesting (desynced)
+        // peer for post-mortem diff. No host round-trip — the server already holds the gzipped
+        // save in memory from the last Client_WorldDataUpload. Empty array if nothing cached
+        // yet (early-session desync); the client side handles the empty case gracefully.
+        [TypedPacketHandler]
+        public void HandleRequestHostSave(ClientRequestHostSavePacket _)
+        {
+            var saved = Server.worldData?.savedGame ?? System.Array.Empty<byte>();
+            Player.SendPacket(new ServerHostSaveTransferPacket(saved));
         }
 
         [TypedPacketHandler]
@@ -127,6 +140,16 @@ namespace Multiplayer.Common
             // stream. Drop quietly; the queued Disconnect will close the connection shortly.
             if (Player.pendingBufferOverflowed) return;
 
+            // Generation gate: the ack must reference the *current* transfer for this (player,
+            // mapId). A Rejoin clears mapTransferIds and a re-stream bumps it; an ack carrying an
+            // old id belongs to a transfer that's already been superseded. Drop quietly — letting
+            // it through would either drain the buffer for a transfer the client no longer has
+            // loaded, or remove the still-in-flight current generation from inFlightMapIds before
+            // its real ack lands.
+            if (!Player.mapTransferIds.TryGetValue(mapId, out var currentTransferId)
+                || currentTransferId != packet.transferId)
+                return;
+
             // Only honour acks for maps the server actually requested. inFlightMapIds.Remove returns
             // false if mapId wasn't tracked — that covers stale duplicates AND unsolicited/malicious
             // acks. Without this gate the client could mark arbitrary maps as loaded and have
@@ -143,11 +166,12 @@ namespace Multiplayer.Common
 
             if (Player.pendingMapCmds.Count > 0)
             {
+                // Each buffered packet was already finalized in CommandHandler.Send with a
+                // baked-in per-player seq, and sentCmdsCount was incremented at buffer time.
+                // Just push the bytes — incrementing again here would skew the seq baseline
+                // and the next live cmd would arrive at the client with a stale seq.
                 foreach (var raw in Player.pendingMapCmds)
-                {
                     Player.conn.Send(new SerializedPacket(Packets.Server_Command, raw), true);
-                    Player.sentCmdsCount++;
-                }
                 Player.pendingMapCmds.Clear();
             }
         }
@@ -165,8 +189,17 @@ namespace Multiplayer.Common
             string msg = packet.msg;
             msg = msg.Trim();
 
-            // todo handle max length
             if (msg.Length == 0) return;
+
+            // Length cap is enforced AFTER trimming so a short message padded with whitespace can't
+            // bypass the limit. Drop (rather than truncate or disconnect): truncating would silently
+            // mangle commands like /kick <user>, and disconnecting is too aggressive for chat abuse.
+            // Log so an admin watching the server console can see who's tripping the cap.
+            if (msg.Length > MaxChatMsgLength)
+            {
+                ServerLog.Log($"[Chat] Dropping {msg.Length}-char message from {connection.username} (cap is {MaxChatMsgLength})");
+                return;
+            }
 
             if (msg[0] == '/')
             {
@@ -192,11 +225,22 @@ namespace Multiplayer.Common
 
             // Parse into locals first so a rejection mid-stream doesn't leave worldData with empty
             // mapData while savedGame/sessionData still hold the previous snapshot.
+            //
+            // mapId shape: must be non-negative (negative ids are sentinels — Global, world view,
+            // disconnect — and never name a real map) and unique within the upload (duplicates
+            // would silently overwrite earlier entries, masking client/state corruption upstream).
+            // Reject via ReaderException to match the count check above; the worldData snapshot
+            // stays untouched because we only commit after the whole stream parses cleanly.
             var mapData = new Dictionary<int, byte[]>(maps);
             for (int i = 0; i < maps; i++)
             {
                 int mapId = data.ReadInt32();
-                mapData[mapId] = data.ReadPrefixedBytes(MaxMapDataBytes);
+                if (mapId < 0)
+                    throw new ReaderException($"Negative mapId in world upload: {mapId}");
+                if (!mapData.ContainsKey(mapId))
+                    mapData[mapId] = data.ReadPrefixedBytes(MaxMapDataBytes);
+                else
+                    throw new ReaderException($"Duplicate mapId in world upload: {mapId}");
             }
 
             var savedGame = data.ReadPrefixedBytes(MaxSavedGameBytes);
@@ -220,13 +264,27 @@ namespace Multiplayer.Common
             Server.SendToIngame(serverPacket, reliable: false, excluding: Player);
         }
 
-        [TypedPacketHandler]
-        public void HandleSelected(ClientSelectedPacket packet) =>
-            Server.SendToPlaying(new ServerSelectedPacket(Player.id, packet), excluding: Player);
+        // Rate-limit budgets are expressed in NetTicks (NetTicksPerSecond=30). Selected/ping/freeze
+        // are best-effort UI updates — silently dropping over-budget packets is the correct policy:
+        // disconnecting would punish UI lag, queueing would amplify it. Cursor already has its own
+        // dedup via lastCursorTick and stays out of the generic limiter.
+        private const int SelectedMinIntervalNetTicks = 3; // ~10 Hz
+        private const int PingMinIntervalNetTicks = 6;     // ~5 Hz
+        private const int FreezeMinIntervalNetTicks = 15;  // ~2 Hz
 
         [TypedPacketHandler]
-        public void HandlePing(ClientPingLocPacket packet) =>
+        public void HandleSelected(ClientSelectedPacket packet)
+        {
+            if (!Player.RateLimitAllow("selected", SelectedMinIntervalNetTicks)) return;
+            Server.SendToPlaying(new ServerSelectedPacket(Player.id, packet), excluding: Player);
+        }
+
+        [TypedPacketHandler]
+        public void HandlePing(ClientPingLocPacket packet)
+        {
+            if (!Player.RateLimitAllow("ping", PingMinIntervalNetTicks)) return;
             Server.SendToPlaying(new ServerPingLocPacket(Player.id, packet));
+        }
 
         [TypedPacketHandler]
         public void HandleClientKeepAlive(ClientKeepAlivePacket packet)
@@ -264,6 +322,8 @@ namespace Multiplayer.Common
         [TypedPacketHandler]
         public void HandleFreeze(ClientFreezePacket packet)
         {
+            if (!Player.RateLimitAllow("freeze", FreezeMinIntervalNetTicks)) return;
+
             Player.frozen = packet.freeze;
 
             if (!packet.freeze)
@@ -310,6 +370,31 @@ namespace Multiplayer.Common
             targetPlayerId == Player.id || Player.IsHost;
 
         [TypedPacketHandler]
-        public void HandleFrameTime(ClientFrameTimePacket packet) => Player.frameTime = packet.frameTime;
+        public void HandleFrameTime(ClientFrameTimePacket packet)
+        {
+            // The downstream clamp in MultiplayerServer.TickNet only bounds the AGGREGATE
+            // serverTimePerTick, not the per-player value that feeds the maxFrameTime scan. A
+            // single NaN or +Inf would propagate (NaN > x is always false, but +Inf trips the
+            // upper clamp and then sticks; a huge finite value forces serverTimePerTick to its
+            // max indefinitely). Reject NaN/Inf at the source and clamp the same range used
+            // downstream so a misbehaving client can't poison time-control for everyone else.
+            float ft = packet.frameTime;
+            const float Min = MultiplayerServer.StandardTimePerTick;
+            const float Max = MultiplayerServer.StandardTimePerTick * 4f;
+            bool bad = float.IsNaN(ft) || float.IsInfinity(ft) || ft < Min || ft > Max;
+            if (bad)
+            {
+                int now = Server.NetTimer;
+                int cooldown = MultiplayerServer.NetTicksPerSecond * 2;
+                if (now - Player.lastBadFrameTimeAt >= cooldown)
+                {
+                    ServerLog.Log($"[FrameTime] Bad value {ft} from {connection.username}; clamping to [{Min}..{Max}]");
+                    Player.lastBadFrameTimeAt = now;
+                }
+                if (float.IsNaN(ft) || ft < Min) ft = Min;
+                else if (ft > Max || float.IsPositiveInfinity(ft)) ft = Max;
+            }
+            Player.frameTime = ft;
+        }
     }
 }

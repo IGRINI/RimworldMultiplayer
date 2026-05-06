@@ -73,6 +73,14 @@ public enum Packets : byte
     // New entries must go at the end (before Count) to keep the on-wire ids of existing packets stable.
     Client_MapLoaded,
 
+    // Section 8: paired desync save. Desynced client requests the host's most recent worldData
+    // snapshot so the report folder contains both the local AND the host's reference state for
+    // post-mortem diff. Snapshot is the last join-point upload, not a fresh save — see
+    // Server_HostSaveTransfer for the limitation note. Fragmented because the gzipped save can
+    // exceed the per-packet limit.
+    Client_RequestHostSave,
+    Server_HostSaveTransfer,
+
     Count,
     Max = 63 // max packet id
 }

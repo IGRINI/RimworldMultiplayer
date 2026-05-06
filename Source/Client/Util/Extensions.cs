@@ -225,6 +225,17 @@ namespace Multiplayer.Client
             return new CRC32().GetCrc32(stream);
         }
 
+        // CRC32 has structural collisions in the wild (different files yielding the same checksum
+        // happen at modlist scale). Use the first 8 bytes of SHA-256 instead: still cheap, but the
+        // distribution is uniform and the keyspace is 2^64 — collision-resistant for our purposes.
+        public static long Sha256First8(this FileInfo file)
+        {
+            using var stream = file.OpenRead();
+            using var hasher = System.Security.Cryptography.SHA256.Create();
+            var hash = hasher.ComputeHash(stream);
+            return System.Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(hash);
+        }
+
         public static int AggregateHash(this IEnumerable<int> e)
         {
             return e.Aggregate(0, (a, b) => Gen.HashCombineInt(a, b));

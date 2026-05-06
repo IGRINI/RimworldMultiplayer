@@ -30,10 +30,24 @@ namespace Multiplayer.Client
         public bool simulating;
         public RoundModeEnum roundMode;
 
+        // Layered structural fingerprint. Computed by CanonicalFingerprint.Compute() at
+        // opinion finalization and compared in CheckForDesync BEFORE the heavier sequence
+        // checks so a structural divergence (lost faction, pawn count drift, missing map)
+        // surfaces with a categorical reason instead of "trace hashes don't match".
+        public ulong canonicalFingerprint;
+
         public string CheckForDesync(ClientSyncOpinion other)
         {
             if (roundMode != other.roundMode)
                 return $"FP round mode doesn't match: {roundMode} != {other.roundMode}";
+
+            // Cheap top-level structural check: if this trips, downstream checks WILL also
+            // trip but with less informative messages. Only treat the fingerprint as load-
+            // bearing when both sides actually computed one (zero means the local compute
+            // threw and was zeroed by the catch in SyncCoordinator.FinishLocalOpinion).
+            if (canonicalFingerprint != 0 && other.canonicalFingerprint != 0
+                && canonicalFingerprint != other.canonicalFingerprint)
+                return $"Canonical fingerprint mismatch: 0x{canonicalFingerprint:X16} vs 0x{other.canonicalFingerprint:X16}";
 
             if (!mapStates.Select(m => m.mapId).SequenceEqual(other.mapStates.Select(m => m.mapId)))
                 return "Map instances don't match";
@@ -85,6 +99,7 @@ namespace Multiplayer.Client
             writer.WritePrefixedInts(desyncStackTraceHashes);
             writer.WriteBool(simulating);
             writer.WriteShort((short)roundMode);
+            writer.WriteULong(canonicalFingerprint);
 
             return writer.ToArray();
         }
@@ -97,7 +112,8 @@ namespace Multiplayer.Client
                 { randomStates = state.randomStates }).ToList(),
             desyncStackTraceHashes = sync.traceHashes,
             simulating = sync.simulating,
-            roundMode = sync.roundMode
+            roundMode = sync.roundMode,
+            canonicalFingerprint = sync.canonicalFingerprint
         };
 
         public SyncOpinion ToNet() => new()
@@ -109,7 +125,8 @@ namespace Multiplayer.Client
                 { mapId = state.mapId, randomStates = state.randomStates }).ToList(),
             traceHashes = desyncStackTraceHashes,
             simulating = simulating,
-            roundMode = roundMode
+            roundMode = roundMode,
+            canonicalFingerprint = canonicalFingerprint
         };
 
         public static ClientSyncOpinion Deserialize(ByteReader data)
@@ -131,6 +148,7 @@ namespace Multiplayer.Client
             var traceHashes = new List<int>(data.ReadPrefixedInts());
             var simulating = data.ReadBool();
             var roundMode = data.ReadShort();
+            var canonicalFingerprint = data.ReadULong();
 
             return new ClientSyncOpinion(startTick)
             {
@@ -139,7 +157,8 @@ namespace Multiplayer.Client
                 mapStates = maps,
                 desyncStackTraceHashes = traceHashes,
                 simulating = simulating,
-                roundMode = (RoundModeEnum)roundMode
+                roundMode = (RoundModeEnum)roundMode,
+                canonicalFingerprint = canonicalFingerprint
             };
         }
 

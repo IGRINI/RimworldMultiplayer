@@ -212,7 +212,10 @@ public class StandaloneMapStreamingEnabledTest
         server.commands.Send(CommandType.Designator, 0, 5, []);
 
         conn.SentPackets.Should().NotContain(Packets.Server_Command);
-        player.sentCmdsCount.Should().Be(0);
+        // sentCmdsCount tracks per-recipient seq baseline — it advances on commit (buffer-add or
+        // immediate-send), not on wire-send specifically. The buffered packet was finalized with
+        // seq=0; the next commit must use seq=1, so sentCmdsCount is already 1 here.
+        player.sentCmdsCount.Should().Be(1);
         player.pendingMapCmds.Should().HaveCount(1);
     }
 
@@ -259,7 +262,10 @@ public class StandaloneMapStreamingEnabledTest
         server.commands.Send(CommandType.PauseAll, 0, ScheduledCommand.Global, []);
 
         conn.SentPackets.Should().NotContain(Packets.Server_Command);
-        player.sentCmdsCount.Should().Be(0);
+        // Same invariant as Streaming_CmdToInFlightMap_BufferedNotDelivered: buffer-add commits a
+        // seq to this player's stream, so sentCmdsCount advances by 1 even though no bytes hit
+        // the wire yet. Drain in HandleMapLoaded sends the bytes without further increments.
+        player.sentCmdsCount.Should().Be(1);
         player.pendingMapCmds.Should().HaveCount(1);
     }
 
@@ -319,6 +325,9 @@ public class StandaloneMapStreamingEnabledTest
         server.worldData.mapData[5] = new byte[] { 9 };
         var (player, conn) = AddPlayer("p", 5);
         player.inFlightMapIds.Add(5);
+        // Tests that bypass HandleClientCommand → SendMapResponse must seed the transferId
+        // generation themselves; HandleMapLoaded now drops acks whose id doesn't match.
+        player.mapTransferIds[5] = 1;
 
         server.commands.Send(CommandType.Designator, 0, 5, []);
         server.commands.Send(CommandType.Designator, 0, 5, []);
@@ -328,7 +337,7 @@ public class StandaloneMapStreamingEnabledTest
         conn.SentPackets.Should().NotContain(Packets.Server_Command);
 
         var state = player.conn.GetState<ServerPlayingState>()!;
-        state.HandleMapLoaded(new ClientMapLoadedPacket(5));
+        state.HandleMapLoaded(new ClientMapLoadedPacket(5, 1));
 
         conn.SentPackets.Count(p => p == Packets.Server_Command).Should().Be(3);
         player.sentCmdsCount.Should().Be(3);
@@ -348,7 +357,7 @@ public class StandaloneMapStreamingEnabledTest
         // No inFlightMapIds setup.
 
         var state = player.conn.GetState<ServerPlayingState>()!;
-        state.HandleMapLoaded(new ClientMapLoadedPacket(99));
+        state.HandleMapLoaded(new ClientMapLoadedPacket(99, 1));
 
         player.loadedMapIds.Should().NotContain(99);
         player.inFlightMapIds.Should().BeEmpty();
@@ -381,14 +390,14 @@ public class StandaloneMapStreamingEnabledTest
             "rapid switch must NOT clear earlier buffered entries");
 
         // Ack(5) first: still in-flight (7), no drain.
-        state.HandleMapLoaded(new ClientMapLoadedPacket(5));
+        state.HandleMapLoaded(new ClientMapLoadedPacket(5, player.mapTransferIds[5]));
         player.loadedMapIds.Should().Contain(5);
         player.inFlightMapIds.Should().NotContain(5).And.Contain(7);
         conn.SentPackets.Should().NotContain(Packets.Server_Command, "drain only on final ack");
 
         // Ack(7) drains everything.
         var bufferedFinal = player.pendingMapCmds.Count;
-        state.HandleMapLoaded(new ClientMapLoadedPacket(7));
+        state.HandleMapLoaded(new ClientMapLoadedPacket(7, player.mapTransferIds[7]));
         player.loadedMapIds.Should().Contain(7);
         player.inFlightMapIds.Should().BeEmpty();
         player.pendingMapCmds.Should().BeEmpty();
@@ -424,7 +433,7 @@ public class StandaloneMapStreamingEnabledTest
 
         // Eventual ack drains everything.
         var bufferedFinal = player.pendingMapCmds.Count;
-        state.HandleMapLoaded(new ClientMapLoadedPacket(5));
+        state.HandleMapLoaded(new ClientMapLoadedPacket(5, player.mapTransferIds[5]));
         player.inFlightMapIds.Should().BeEmpty();
         conn.SentPackets.Count(p => p == Packets.Server_Command).Should().Be(bufferedFinal);
         player.sentCmdsCount.Should().Be(bufferedFinal);
@@ -442,6 +451,8 @@ public class StandaloneMapStreamingEnabledTest
         player.inFlightMapIds.Add(7);
         player.pendingMapCmds.Add([1, 2, 3]);
         player.sentCmdsCount = 42;
+        player.mapTransferIds[5] = 3;
+        player.mapTransferIds[7] = 1;
 
         var state = player.conn.GetState<ServerPlayingState>()!;
         state.HandleRejoin(new ByteReader(Array.Empty<byte>()));
@@ -450,6 +461,8 @@ public class StandaloneMapStreamingEnabledTest
         player.inFlightMapIds.Should().BeEmpty();
         player.pendingMapCmds.Should().BeEmpty();
         player.pendingBufferOverflowed.Should().BeFalse();
+        player.mapTransferIds.Should().BeEmpty(
+            "rejoin must clear transferId generations so a stale ack from a prior transfer can't drain the new buffer");
         // sentCmdsCount: SendWorldData (synchronous on the loading state's async machine) re-seeds
         // it from the SentCmds baseline; ResetTimeVotes then sends one cmd through the streaming
         // branch which lands on the just-rejoined player. The invariant we care about is that
@@ -639,7 +652,7 @@ public class StandaloneMapStreamingEnabledTest
 
         // Ack arrives in the gap before the queued Disconnect runs.
         var state = player.conn.GetState<ServerPlayingState>()!;
-        state.HandleMapLoaded(new ClientMapLoadedPacket(5));
+        state.HandleMapLoaded(new ClientMapLoadedPacket(5, 1));
 
         player.pendingBufferOverflowed.Should().BeTrue("latch must remain set; this ack does NOT recover the player");
         player.inFlightMapIds.Should().Contain(5, "in-flight set must NOT be drained by an ack while overflowed");
@@ -733,6 +746,7 @@ public class StandaloneMapStreamingEnabledTest
         server.worldData.mapData[5] = new byte[] { 2 };
         var (player, conn) = AddPlayer("p", 5, loadedMaps: 3);
         player.inFlightMapIds.Add(5);
+        player.mapTransferIds[5] = 1;
 
         server.commands.Send(CommandType.PauseAll, 0, ScheduledCommand.Global, [0xAA]);
         server.commands.Send(CommandType.Designator, 0, 5, [0xBB]);
@@ -743,7 +757,7 @@ public class StandaloneMapStreamingEnabledTest
         player.pendingMapCmds.Should().HaveCount(5);
 
         var state = player.conn.GetState<ServerPlayingState>()!;
-        state.HandleMapLoaded(new ClientMapLoadedPacket(5));
+        state.HandleMapLoaded(new ClientMapLoadedPacket(5, 1));
 
         var commandMessages = conn.SentMessages.Where(m => m.id == Packets.Server_Command).ToList();
         commandMessages.Should().HaveCount(5);
@@ -756,5 +770,119 @@ public class StandaloneMapStreamingEnabledTest
         }).Where(d => d.Length == 1).Select(d => d[0]).ToArray();
         markers.Should().Equal((byte)0xAA, (byte)0xBB, (byte)0xCC, (byte)0xDD, (byte)0xEE);
         player.sentCmdsCount.Should().Be(5);
+    }
+
+    // ---------------- transferId / snapshotCommandSeq on the wire ----------------
+
+    [Test]
+    public void Streaming_MapLoadedAck_WithStaleTransferId_Ignored()
+    {
+        // A second SendMapResponse for the same mapId bumps the generation. An ack carrying the
+        // OLD generation must NOT drain or mark the map loaded — that ack belongs to a transfer
+        // superseded by a Rejoin or by a re-stream, and honouring it would either drain a buffer
+        // built for the new transfer or remove the in-flight current generation prematurely.
+        server.worldData.mapData[5] = new byte[] { 9 };
+        var (player, conn) = AddPlayer("p", -1, hasReportedCurrentMap: false);
+        var state = player.conn.GetState<ServerPlayingState>()!;
+
+        // First transfer: PlayerCount → SendMapResponse → mapTransferIds[5] = 1.
+        state.HandleClientCommand(new ClientCommandPacket(
+            CommandType.PlayerCount, ScheduledCommand.Global, ByteWriter.GetBytes(-1, 5)));
+        player.mapTransferIds[5].Should().Be(1);
+        var firstTransferId = player.mapTransferIds[5];
+
+        // Force a second SendMapResponse for the SAME mapId without going through the rejoin/clear
+        // path that would reset the dictionary. inFlightMapIds.Clear() lets us re-trigger; the
+        // generation MUST advance from 1 → 2 (that's the whole point of mapTransferIds).
+        player.inFlightMapIds.Clear();
+        server.SendMapResponse(player, 5);
+        var secondTransferId = player.mapTransferIds[5];
+        secondTransferId.Should().Be(firstTransferId + 1, "second SendMapResponse must increment generation");
+
+        // Buffer a cmd while the (current) transfer is in flight.
+        player.inFlightMapIds.Add(5);
+        server.commands.Send(CommandType.Designator, 0, 5, [0xCC]);
+        var bufferedBefore = player.pendingMapCmds.Count;
+        bufferedBefore.Should().BeGreaterThan(0, "buffer must hold at least the cmd we just sent");
+
+        // Stale ack carrying the OLD generation. Must be a no-op.
+        var commandsBefore = conn.SentPackets.Count(p => p == Packets.Server_Command);
+        state.HandleMapLoaded(new ClientMapLoadedPacket(5, firstTransferId));
+
+        player.pendingMapCmds.Count.Should().Be(bufferedBefore, "stale ack must NOT drain the buffer");
+        player.loadedMapIds.Should().NotContain(5, "stale ack must NOT mark the map loaded");
+        player.inFlightMapIds.Should().Contain(5, "stale ack must NOT clear inFlight for the current transfer");
+        conn.SentPackets.Count(p => p == Packets.Server_Command).Should().Be(commandsBefore,
+            "stale ack must NOT push buffered cmds to the wire");
+
+        // Current ack drains as expected.
+        state.HandleMapLoaded(new ClientMapLoadedPacket(5, secondTransferId));
+        player.loadedMapIds.Should().Contain(5);
+        player.pendingMapCmds.Should().BeEmpty();
+        conn.SentPackets.Count(p => p == Packets.Server_Command).Should().Be(commandsBefore + bufferedBefore);
+    }
+
+    [Test]
+    public void Streaming_MapResponse_CarriesIncrementingTransferId()
+    {
+        // Each SendMapResponse for the same (player, mapId) must stamp a strictly increasing
+        // transferId on the wire. That id is what the client echoes back in Client_MapLoaded; the
+        // server-side generation gate uses it to discard stale acks.
+        server.worldData.mapData[5] = new byte[] { 9 };
+        var (player, conn) = AddPlayer("p", -1, hasReportedCurrentMap: false);
+
+        server.SendMapResponse(player, 5);
+        // Allow a re-trigger by clearing the in-flight bookkeeping (the test simulates two
+        // distinct streaming attempts; we don't go through HandleClientCommand here because that
+        // path also gates on `inFlightMapIds.Add` returning true).
+        player.inFlightMapIds.Clear();
+        server.SendMapResponse(player, 5);
+
+        var responses = conn.SentMessages.Where(m => m.id == Packets.Server_MapResponse).ToList();
+        responses.Should().HaveCount(2);
+
+        // Wire layout: [mapId int32][transferId int32][snapshotCommandSeq int32]...
+        var firstReader = new ByteReader(responses[0].body);
+        firstReader.ReadInt32().Should().Be(5);
+        int firstTransferId = firstReader.ReadInt32();
+
+        var secondReader = new ByteReader(responses[1].body);
+        secondReader.ReadInt32().Should().Be(5);
+        int secondTransferId = secondReader.ReadInt32();
+
+        firstTransferId.Should().Be(1, "first SendMapResponse stamps generation 1 on a fresh entry");
+        secondTransferId.Should().Be(2, "second SendMapResponse must stamp the next generation");
+        secondTransferId.Should().BeGreaterThan(firstTransferId, "transferId must be strictly monotonic per (player, mapId)");
+    }
+
+    [Test]
+    public void Streaming_MapResponse_CarriesSnapshotCommandSeq()
+    {
+        // snapshotCommandSeq documents which player.sentCmdsCount baseline the snapshot's mapCmds
+        // were taken under. Even though the client doesn't currently consume it (snapshot cmds
+        // bypass HandleCommand → no seq enforcement), having it on the wire makes future
+        // verification possible without another protocol bump.
+        server.worldData.mapData[5] = new byte[] { 9 };
+        server.worldData.mapData[7] = new byte[] { 8 };
+        var (player, conn) = AddPlayer("p", 5, loadedMaps: 5);
+
+        // N cmds for the loaded map land on the wire and bump player.sentCmdsCount.
+        server.commands.Send(CommandType.Designator, 0, 5, []);
+        server.commands.Send(CommandType.Designator, 0, 5, []);
+        server.commands.Send(CommandType.Designator, 0, 5, []);
+        var sentCmdsAtMapResponse = player.sentCmdsCount;
+        sentCmdsAtMapResponse.Should().Be(3);
+
+        // Trigger a fresh MapResponse for a different mapId. snapshotCommandSeq on the wire must
+        // equal the player.sentCmdsCount value AT MapResponse send time.
+        server.SendMapResponse(player, 7);
+
+        var response = conn.SentMessages.Single(m => m.id == Packets.Server_MapResponse);
+        var reader = new ByteReader(response.body);
+        reader.ReadInt32().Should().Be(7); // mapId
+        reader.ReadInt32().Should().Be(1); // transferId (first for mapId=7)
+        int snapshotCommandSeq = reader.ReadInt32();
+        snapshotCommandSeq.Should().Be(sentCmdsAtMapResponse,
+            "snapshotCommandSeq on the wire must equal player.sentCmdsCount at MapResponse send time");
     }
 }

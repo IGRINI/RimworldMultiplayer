@@ -284,8 +284,23 @@ namespace Multiplayer.Common
             if (mapId < 0 || !worldData.mapData.ContainsKey(mapId))
                 return;
 
+            // Bump the per-(player, mapId) transfer generation. The matching Client_MapLoaded ack
+            // must echo this id back; HandleMapLoaded discards acks whose id doesn't match. That
+            // closes a race where a Rejoin (or a second streaming attempt for the same mapId)
+            // supersedes an earlier transfer — the late ack can't drain the new buffer.
+            player.mapTransferIds.TryGetValue(mapId, out var prev);
+            int transferId = prev + 1;
+            player.mapTransferIds[mapId] = transferId;
+
             ByteWriter writer = new ByteWriter();
             writer.WriteInt32(mapId);
+            writer.WriteInt32(transferId);
+            // snapshotCommandSeq: the player.sentCmdsCount baseline at MapResponse send time.
+            // Documents which seq the snapshot's mapCmds were taken under. The client doesn't
+            // currently use this — snapshot cmds bypass HandleCommand → no seq enforcement on
+            // them — but having it on the wire makes future verification possible without another
+            // protocol bump.
+            writer.WriteInt32(player.sentCmdsCount);
 
             var mapCmds = worldData.mapCmds.GetValueSafe(mapId) ?? [];
             writer.WriteInt32(mapCmds.Count);

@@ -6,6 +6,7 @@ using System.Linq;
 using System.Reflection;
 using HarmonyLib;
 using Multiplayer.Client.Patches;
+using Multiplayer.Common.Util;
 using Verse;
 
 namespace Multiplayer.Client.Util;
@@ -105,7 +106,7 @@ public static class SyncConfigs
         {
             try
             {
-                return new ModConfig(id, file, Contents: File.ReadAllText(path));
+                return new ModConfig(id, file, Contents: Normalize(File.ReadAllText(path)));
             }
             catch (Exception e)
             {
@@ -117,6 +118,12 @@ public static class SyncConfigs
 
     public static string GetConfigPath(string modId, string handleName) =>
         Path.Combine(TempConfigsPath, GenText.SanitizeFilename($"Mod_{modId}_{handleName}.xml"));
+
+    // Forwarder so existing callers (and the JoinData read path) keep their familiar
+    // SyncConfigs.Normalize entry point. The actual XML canonicalisation lives in
+    // Multiplayer.Common.Util.XmlNormalize so the test project can exercise it without
+    // pulling in the Client/RimWorld dependencies.
+    public static string Normalize(string contents) => XmlNormalize.Normalize(contents);
 }
 
 // Affects both reading and writing

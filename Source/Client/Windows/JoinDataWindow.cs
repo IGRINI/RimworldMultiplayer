@@ -9,6 +9,7 @@ using Steamworks;
 using UnityEngine;
 using Verse;
 using Verse.Steam;
+using CompatFp = Multiplayer.Common.Util.CompatibilityFingerprint;
 
 namespace Multiplayer.Client
 {
@@ -264,6 +265,35 @@ namespace Multiplayer.Client
 
         private bool HasCoreMismatches() => filesRoot.children.Any(c => c.id.Contains("ludeon"));
 
+        // Cached on first paint — fingerprint over local snapshot is small but allocates a sort
+        // of every file path; no need to recompute every frame.
+        private ulong? cachedLocalFingerprint;
+        private ulong? cachedRemoteFingerprint;
+
+        private static IEnumerable<(string modId, string relPath, long hash)> FlattenFiles(ModFileDict d)
+        {
+            foreach (var kv in d)
+                foreach (var f in kv.Value.Values)
+                    yield return (kv.Key, f.relPath, f.hash);
+        }
+
+        private ulong LocalFingerprint() => cachedLocalFingerprint ??= CompatFp.Compute(
+            JoinData.activeModsSnapshot.Select(m => (m.PackageIdNonUnique, m.Source.ToString())),
+            FlattenFiles(JoinData.modFilesSnapshot),
+            SyncConfigs.GetSyncableConfigContents(JoinData.activeModsSnapshot.Select(m => m.PackageIdNonUnique).ToList())
+                .Select(c => (c.ModId, c.FileName, c.Contents)),
+            VersionControl.CurrentVersionString,
+            MpVersion.Version
+        );
+
+        private ulong RemoteFingerprint() => cachedRemoteFingerprint ??= CompatFp.Compute(
+            remote.remoteMods.Select(m => (m.packageId, m.source.ToString())),
+            FlattenFiles(remote.remoteFiles),
+            remote.remoteModConfigs.Select(c => (c.ModId, c.FileName, c.Contents)),
+            remote.remoteRwVersion,
+            remote.remoteMpVersion
+        );
+
         private string DiffString()
         {
             var str = "";
@@ -271,7 +301,8 @@ namespace Multiplayer.Client
             str += $"Mod list diff: {modListDiff}, ";
             str += $"Files match: {!filesRoot.children.Any()}, ";
             str += $"Config sync enabled: {remote.hasConfigs}, ";
-            str += $"Configs match: {!configsRoot.children.Any()}";
+            str += $"Configs match: {!configsRoot.children.Any()}, ";
+            str += $"Local fp: 0x{LocalFingerprint():X16}, Remote fp: 0x{RemoteFingerprint():X16}";
             return str;
         }
 
@@ -351,6 +382,17 @@ namespace Multiplayer.Client
                 Widgets.Checkbox(new Rect(0, 0, 24, 24).CenterOn(checkboxColumn.Down(2 * rowHeight)).min, ref mpVersionCheck);
 
                 inRect.yMin += rowHeight * 3 + 30f;
+            }
+
+            // Fingerprint line — paste-friendly identifier the user can include in bug reports.
+            // Shows up regardless of which fields actually mismatched, so two reports with the
+            // same hash mean the same setup.
+            using (MpStyle.Set(GameFont.Tiny))
+            using (MpStyle.Set(TextAnchor.MiddleCenter))
+            using (MpStyle.Set(new Color(0.55f, 0.55f, 0.55f)))
+            {
+                var fpLine = $"Local: 0x{LocalFingerprint():X16}    Remote: 0x{RemoteFingerprint():X16}";
+                Widgets.Label(inRect.Height(20).Width(500f).CenteredOnXIn(inRect), fpLine);
             }
         }
 

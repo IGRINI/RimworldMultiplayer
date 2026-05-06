@@ -247,9 +247,18 @@ public class AsyncWorldTimeComp : IExposable, ITickable
                 MpLog.Debug($"[{worldTicks}|{Multiplayer.session.remoteTickUntil}] Player count change: previousMapId={previousMapId} ({prev}), newMapId={newMapId} ({curr}), mapCount={mapCount}");
             }
         }
+        catch (OutOfMemoryException) { throw; }
+        catch (StackOverflowException) { throw; }
         catch (Exception e)
         {
+            // A Sync cmd can mutate game state before throwing; peers may have applied it cleanly.
+            // Logging-and-continuing leaves the local sim partially-applied → silent state drift
+            // until a later opinion-hash mismatch surfaces it (or never). Treat as fatal: trigger
+            // a protocol desync so the user sees it now. World cmds have no mapId — pass Global.
             Log.Error($"World cmd exception ({cmdType}): {e}");
+            Multiplayer.session?.TriggerProtocolDesync(
+                $"Cmd execution failed: type={cmd.type}, mapId={cmd.mapId}, tick={cmd.ticks}, ex={e.GetType().Name}: {e.Message}"
+            );
         }
         finally
         {

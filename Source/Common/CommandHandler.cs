@@ -68,9 +68,14 @@ namespace Multiplayer.Common
             // preserve server-order. The client's Cmds is a plain Queue<>; TickPatch.RunCmds peeks
             // by ticks==curTimer and stalls on out-of-order entries. While loading the client is
             // paused (replayTimeSpeed=Paused), so buffering doesn't degrade responsiveness.
+            //
+            // Each on-wire packet now carries a per-recipient monotonic seq. The client validates
+            // packet.seq == receivedCmds and treats any mismatch as a fatal sync failure. That means
+            // sentCmdsCount must increment exactly once per emitted (or buffered) packet — both
+            // immediate-send and buffer-add paths bump it here, and the drain in HandleMapLoaded
+            // does NOT increment again (the bytes were finalized at buffer time).
             if (server.IsStandaloneServer)
             {
-                var serialized = ServerCommandPacket.From(cmd).Serialize();
                 foreach (var player in server.PlayingPlayers)
                 {
                     bool relevant = mapId < 0
@@ -102,19 +107,24 @@ namespace Multiplayer.Common
                             server.Enqueue(() => captured.Disconnect("MpStreamingPendingBufferOverflow"));
                             continue;
                         }
-                        player.pendingMapCmds.Add(serialized.data);
+                        var bufferedBytes = ServerCommandPacket.From(cmd, player.sentCmdsCount).Serialize();
+                        player.pendingMapCmds.Add(bufferedBytes.data);
+                        player.sentCmdsCount++;
                     }
                     else
                     {
-                        player.conn.Send(serialized, true);
+                        var perPlayerPacket = ServerCommandPacket.From(cmd, player.sentCmdsCount).Serialize();
+                        player.conn.Send(perPlayerPacket, true);
                         player.sentCmdsCount++;
                     }
                 }
             }
             else
             {
-                // Embedded host (legacy): single broadcast, global sentCmdsSnapshot drives TimeControl.
-                server.SendToPlaying(ServerCommandPacket.From(cmd));
+                // Embedded host (legacy): single broadcast. All PlayingPlayers see exactly the same
+                // cmd stream, so the global SentCmds counter is the same as each client's expected
+                // receivedCmds — assign seq from it before the increment below.
+                server.SendToPlaying(ServerCommandPacket.From(cmd, SentCmds));
             }
 
             SentCmds++;

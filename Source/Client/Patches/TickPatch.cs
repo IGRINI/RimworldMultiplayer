@@ -50,10 +50,44 @@ namespace Multiplayer.Client
                 yield return Multiplayer.AsyncWorldTime;
 
                 var maps = Find.Maps;
-                for (int i = maps.Count - 1; i >= 0; i--)
-                    yield return maps[i].AsyncTime();
+                // Canonical iteration order: ascending by uniqueID. Find.Maps insertion order can
+                // diverge across peers after lazy reloads (a map removed and re-streamed lands at a
+                // different list index) — using the synced uniqueID instead keeps per-tick state
+                // mutations applied in the same order on every peer.
+                int n = maps.Count;
+                if (n <= 1)
+                {
+                    for (int i = 0; i < n; i++) yield return maps[i].AsyncTime();
+                    yield break;
+                }
+                // Avoid LINQ allocation in the hot path: small N, heap-allocate a tiny index array
+                // (stackalloc isn't usable inside an iterator state machine), insertion-sort it,
+                // then yield in order. Insertion sort is O(N^2) but N is bounded by playable map
+                // count (~10), so the work is trivial vs. the per-tick cost downstream.
+                int[] idx = new int[n];
+                for (int i = 0; i < n; i++) idx[i] = i;
+                for (int i = 1; i < n; i++)
+                {
+                    int cur = idx[i];
+                    int key = maps[cur].uniqueID;
+                    int j = i - 1;
+                    while (j >= 0 && maps[idx[j]].uniqueID > key)
+                    {
+                        idx[j + 1] = idx[j];
+                        j--;
+                    }
+                    idx[j + 1] = cur;
+                }
+                for (int i = 0; i < n; i++) yield return maps[idx[i]].AsyncTime();
             }
         }
+
+        // O(1) id lookup. Maps are added/removed during play, but we don't hook every mutation
+        // site; instead we rebuild the cache when Find.Maps.Count changes. A same-count remove+add
+        // in the same frame would leak a stale entry, but RimWorld doesn't do that at the
+        // resolution we care about. Reset() also clears the cache so a session reload starts fresh.
+        private static readonly Dictionary<int, ITickable> tickableLookup = new();
+        private static int tickableLookupMapCount = -1;
 
         static Stopwatch updateTimer = Stopwatch.StartNew();
         public static Stopwatch tickTimer = Stopwatch.StartNew();
@@ -175,6 +209,25 @@ namespace Multiplayer.Client
         {
             int curTimer = Timer;
 
+            // Fail-fast: detect FP rounding-mode drift on every tick instead of waiting up to
+            // 30 ticks for the next sync-opinion exchange. Latches the mode we started in;
+            // can't catch initial peer mismatch but does catch the actual common bug pattern
+            // (native DLL or Unity setting flipping mode mid-session).
+            var currentRound = RoundMode.GetCurrentRoundMode();
+            if (RoundMode.Expected is { } expected)
+            {
+                if (currentRound != expected)
+                {
+                    Multiplayer.session.TriggerProtocolDesync(
+                        $"Round mode drift: expected {expected}, got {currentRound}");
+                    return true;
+                }
+            }
+            else
+            {
+                RoundMode.Expected = currentRound;
+            }
+
             // Re-attempt deferred cmds first: target might have appeared since last call. We can only
             // execute a deferred cmd when its tick matches the current Timer — running it on a later
             // tick would diverge from peers (deterministic desync). If the tick has already passed,
@@ -203,8 +256,27 @@ namespace Multiplayer.Client
 
             foreach (ITickable tickable in AllTickables)
             {
-                while (tickable.Cmds.Count > 0 && tickable.Cmds.Peek().ticks == curTimer)
+                while (tickable.Cmds.Count > 0)
                 {
+                    int peekTicks = tickable.Cmds.Peek().ticks;
+
+                    // Future cmd: standard wait. Run when curTimer catches up.
+                    if (peekTicks > curTimer) break;
+
+                    if (peekTicks < curTimer)
+                    {
+                        // The head cmd's tick is already in the past. Executing it now would
+                        // mutate state on a tick where peers had no such mutation — a guaranteed,
+                        // silent desync. There is no recovery from this state in the local sim, so
+                        // halt explicitly and let the user rejoin from the server's authoritative
+                        // state rather than letting RunCmds spin forever (Peek().ticks==curTimer
+                        // would never become true since curTimer only advances).
+                        var stale = tickable.Cmds.Peek();
+                        Multiplayer.session.TriggerProtocolDesync(
+                            $"Late command at queue head: cmd.ticks={stale.ticks}, curTimer={curTimer}, mapId={stale.mapId}, type={stale.type}");
+                        return true;
+                    }
+
                     ScheduledCommand cmd = tickable.Cmds.Dequeue();
                     // Minimal code impact fix for #733. Having all the commands be added to a single queue gets rid of
                     // the out-of-order execution problem. With a proper fix, this can be reverted to tickable.ExecuteCmd
@@ -352,12 +424,30 @@ namespace Multiplayer.Client
             avgFrameTime = StandardTimePerFrame;
             realTime = 0;
             deferredCmds.Clear();
+            tickableLookup.Clear();
+            tickableLookupMapCount = -1;
             TimeControlPatch.prePauseTimeSpeed = null;
+            RoundMode.Reset();
         }
 
         public static void SetTimer(int value) => Timer = value;
 
-        public static ITickable TickableById(int tickableId) => AllTickables.FirstOrDefault(t => t.TickableId == tickableId);
+        public static ITickable TickableById(int tickableId)
+        {
+            var maps = Find.Maps;
+            if (tickableLookupMapCount != maps.Count)
+            {
+                tickableLookup.Clear();
+                tickableLookup[Multiplayer.AsyncWorldTime.TickableId] = Multiplayer.AsyncWorldTime;
+                for (int i = 0; i < maps.Count; i++)
+                {
+                    var atc = maps[i].AsyncTime();
+                    tickableLookup[atc.TickableId] = atc;
+                }
+                tickableLookupMapCount = maps.Count;
+            }
+            return tickableLookup.GetValueOrDefault(tickableId);
+        }
     }
 
     public class SimulatingData

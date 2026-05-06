@@ -37,6 +37,7 @@ public class PacketTest
 
         yield return new ServerCommandPacket
         {
+            seq = 0,
             type = CommandType.Sync,
             ticks = 100,
             factionId = 1,
@@ -47,6 +48,7 @@ public class PacketTest
 
         yield return new ServerCommandPacket
         {
+            seq = 12345,
             type = CommandType.CreateJoinPoint,
             ticks = 200,
             factionId = 5,
@@ -143,7 +145,8 @@ public class PacketTest
             ],
             traceHashes = [999, 888, 777],
             simulating = true,
-            roundMode = RoundModeEnum.ToNearest
+            roundMode = RoundModeEnum.ToNearest,
+            canonicalFingerprint = 0xDEADBEEFCAFEBABEUL
         };
 
         yield return new ClientSyncInfoPacket { SyncOpinion = sampleOpinion };
@@ -242,6 +245,13 @@ public class PacketTest
         yield return new ClientDesyncedPacket(1234, 4567);
         yield return new ClientDesyncedPacket(0, 0);
         yield return new ClientDesyncedPacket(100, 0);
+
+        // Section 8 (architectural roadmap) — paired desync save protocol. The request packet is
+        // intentionally empty (no fields → BeEquivalentTo refuses to compare zero members), so its
+        // body roundtrip lives in DesyncRecoveryTest.ClientRequestHostSavePacket_HasEmptyBody. The
+        // response packet still goes through this generic roundtrip suite.
+        yield return new ServerHostSaveTransferPacket(System.Array.Empty<byte>());
+        yield return new ServerHostSaveTransferPacket("compressed-savegame-bytes"u8.ToArray());
     }
 
     [TestCaseSource(nameof(RoundtripPackets))]

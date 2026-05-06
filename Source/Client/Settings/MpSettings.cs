@@ -19,6 +19,19 @@ namespace Multiplayer.Client
         public bool includeReplayInDesync = VersionChecker.IsContinuousRelease;
         public int jittedMethodsInDesync = 1500;
         public int desyncTracesRadius = 40;
+        // Section 8 (architectural roadmap): explicit opt-in. When the local peer detects a desync
+        // (protocol-level via TriggerProtocolDesync, or sync-opinion mismatch via SyncCoordinator
+        // .HandleDesync) we still surface DesyncedWindow so the user knows why; if this flag is
+        // set we ALSO schedule Rejoiner.DoRejoin() after a short delay so unattended sessions
+        // recover automatically. Default false because rejoin is destructive of the local
+        // simulation state and silent recovery has historically masked real determinism bugs.
+        public bool autoRejoinOnDesync = false;
+        // Section 8: dev-only "save twice and diff bytes" probe wired into the desync handler. A
+        // diff means the save format embeds non-deterministic enumeration order (Dictionary/HashSet
+        // without explicit sort) or runtime hash codes — a strong signal for the underlying
+        // determinism bug rather than just "two peers diverged at tick N". Off by default; only
+        // makes sense when Prefs.DevMode || MpVersion.IsDebug.
+        public bool heavyDiagnosticMode = false;
         public string serverAddress = "127.0.0.1";
         public bool appendNameToAutosave;
         public bool showModCompatibility = true;
@@ -65,6 +78,8 @@ namespace Multiplayer.Client
             Scribe_Values.Look(ref includeReplayInDesync, "includeReplayInDesync", VersionChecker.IsContinuousRelease);
             Scribe_Values.Look(ref jittedMethodsInDesync, "jittedMethodsInDesync", 1500);
             Scribe_Values.Look(ref desyncTracesRadius, "desyncTracesRadius", 40);
+            Scribe_Values.Look(ref autoRejoinOnDesync, "autoRejoinOnDesync", false);
+            Scribe_Values.Look(ref heavyDiagnosticMode, "heavyDiagnosticMode", false);
             Scribe_Values.Look(ref serverAddress, "serverAddress", "127.0.0.1");
             Scribe_Values.Look(ref showModCompatibility, "showModCompatibility", true);
             Scribe_Values.Look(ref hideTranslationMods, "hideTranslationMods", true);

@@ -4,6 +4,7 @@ using LudeonTK;
 using Multiplayer.Client.Networking;
 using Multiplayer.Client.Util;
 using Multiplayer.Common;
+using Multiplayer.Common.Networking.Packet;
 using RimWorld;
 using Steamworks;
 using UnityEngine;
@@ -38,6 +39,12 @@ namespace Multiplayer.Client
         public bool showTimeline;
 
         public bool desynced;
+
+        // Per-mapId transferId from the most recent Server_MapResponse for that map. Echoed back in
+        // Client_MapLoaded so the server can discard stale acks (e.g. from a transfer superseded by
+        // Rejoin or re-stream). Updated in HandleMapResponse, consumed once when ReloadGame's
+        // post-load callback fires the ack — either side may overwrite by simply re-streaming.
+        public Dictionary<int, int> pendingMapTransferIds = new();
 
         public List<CSteamID> pendingSteam = new();
         public List<CSteamID> knownUsers = new();
@@ -124,6 +131,50 @@ namespace Multiplayer.Client
         {
             if (receivedCmds >= remoteSentCmds)
                 TickPatch.tickUntil = remoteTickUntil;
+        }
+
+        // Fatal protocol-level desyncs (command sequence gap, late command in main queue, etc.)
+        // come from the protocol layer rather than from a sync-opinion mismatch — they have no
+        // SaveableDesyncInfo to compare. Centralise the "halt the simulation, surface a window,
+        // tell the server" sequence here so every fatal site does the same thing.
+        private bool protocolDesyncReported;
+        public void TriggerProtocolDesync(string reason)
+        {
+            if (desynced) return;
+            desynced = true;
+            TickPatch.ClearSimulating();
+
+            if (protocolDesyncReported) return;
+            protocolDesyncReported = true;
+
+            MpLog.Error($"Protocol desync: {reason}");
+            try
+            {
+                Multiplayer.Client?.Send(new ClientDesyncedPacket(TickPatch.Timer, 0));
+            }
+            catch
+            {
+                // If the connection is already torn down, swallow — the window will still appear
+                // and the user can rejoin manually.
+            }
+
+            OnMainThread.Enqueue(() =>
+            {
+                MpUI.ClearWindowStack();
+                Find.WindowStack.Add(new DesyncedWindow(reason, null));
+            });
+
+            // Section 8 auto-rejoin opt-in. Window still appears so the user sees what happened
+            // (and can cancel by closing the game / disabling the setting before the delay
+            // elapses); rejoin proceeds automatically afterwards. Protocol desyncs have NO
+            // SaveableDesyncInfo to write so a short delay is fine — only chat / log readability
+            // matters here.
+            if (Multiplayer.settings.autoRejoinOnDesync)
+                OnMainThread.Schedule(static () =>
+                {
+                    if (Multiplayer.Client != null && Multiplayer.session != null && Multiplayer.session.desynced)
+                        Rejoiner.DoRejoin();
+                }, 1.5f);
         }
 
         [TweakValue("Multiplayer")] public static bool consistentCommandOrder = true;

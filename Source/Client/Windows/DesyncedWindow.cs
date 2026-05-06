@@ -2,6 +2,7 @@ using JetBrains.Annotations;
 using Multiplayer.Client.Desyncs;
 using Multiplayer.Client.Util;
 using Multiplayer.Common;
+using Multiplayer.Common.Networking.Packet;
 using UnityEngine;
 using Verse;
 
@@ -15,13 +16,18 @@ namespace Multiplayer.Client
         public override Vector2 InitialSize => new(30 + 130 * NumButtons, 110);
 
         private string text;
-        private readonly SaveableDesyncInfo desyncInfo;
+        [CanBeNull] private readonly SaveableDesyncInfo desyncInfo;
         private float openedAt;
         private bool infoWritten;
         private bool rejoining;
         [CanBeNull] private SaveableDesyncInfo.HostInfo hostInfo;
 
-        public DesyncedWindow(string text, SaveableDesyncInfo desyncInfo)
+        // Section 8 paired save: stash whatever the server replied with for Client_RequestHostSave
+        // so it can be folded into the desync zip alongside Traces/JittedMethods. Either piece may
+        // arrive in any order; both feed into the single HostInfo passed to SaveableDesyncInfo.Save.
+        private byte[] hostSavedGame;
+
+        public DesyncedWindow(string text, [CanBeNull] SaveableDesyncInfo desyncInfo)
         {
             this.text = text;
             this.desyncInfo = desyncInfo;
@@ -37,6 +43,16 @@ namespace Multiplayer.Client
 #if DEBUG
             doCloseX = true;
 #endif
+
+            // Section 8: kick off the host-save fetch as soon as the window is constructed so the
+            // bytes are likely available by the time WindowUpdate decides to flush the report.
+            // Only meaningful when there's an actual desyncInfo to write into; protocol desyncs
+            // skip the report path entirely, so don't waste a packet round-trip.
+            if (desyncInfo != null && Multiplayer.Client != null)
+            {
+                try { Multiplayer.Client.Send(new ClientRequestHostSavePacket()); }
+                catch { /* connection torn down — report still writes with no host save. */ }
+            }
         }
 
         public override void DoWindowContents(Rect inRect)
@@ -95,17 +111,40 @@ namespace Multiplayer.Client
 
         public void HandleHostDesyncInfo(SaveableDesyncInfo.HostInfo hostInfo)
         {
-            this.hostInfo = hostInfo;
+            // Section 8: merge the freshly-arrived traces/jittedMethods with any host save bytes
+            // that have already arrived (or will arrive later). The two payloads are independent
+            // — the host save flows from a different packet pair (Client_RequestHostSave →
+            // Server_HostSaveTransfer) than the traces (ServerTracesPacket Request/Transfer).
+            this.hostInfo = hostInfo with { HostSavedGame = hostSavedGame ?? hostInfo.HostSavedGame };
+        }
+
+        // Called by ClientPlayingState.HandleHostSaveTransfer. Folds the host save bytes into the
+        // existing hostInfo if present; otherwise stashes them so the next HandleHostDesyncInfo
+        // call merges them in.
+        public void HandleHostSavedGame(byte[] savedGame)
+        {
+            hostSavedGame = savedGame;
+            if (hostInfo != null)
+                hostInfo = hostInfo with { HostSavedGame = savedGame };
         }
 
         public override void WindowUpdate()
         {
             const float maxWait = 5f;
 
+            // Protocol-level desyncs (e.g. command-stream gap) trigger this window without a
+            // SaveableDesyncInfo — there's nothing to compare or write. Skip the report path.
+            if (desyncInfo == null) return;
+
             var shouldWrite = hostInfo != null || Time.realtimeSinceStartup - openedAt > maxWait;
             if (!infoWritten && shouldWrite && desyncInfo.ReadyToSave)
             {
-                desyncInfo.Save(hostInfo);
+                // Even if hostInfo is still null after maxWait, fold in any host save we did
+                // receive so the report at least contains that.
+                var infoForSave = hostInfo;
+                if (infoForSave == null && hostSavedGame != null)
+                    infoForSave = new SaveableDesyncInfo.HostInfo(null, null, hostSavedGame);
+                desyncInfo.Save(infoForSave);
                 infoWritten = true;
             }
         }

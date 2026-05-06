@@ -6,6 +6,7 @@ using HarmonyLib;
 using Ionic.Zlib;
 using Multiplayer.Client.Util;
 using Multiplayer.Common;
+using Multiplayer.Common.Util;
 using RimWorld;
 using Steamworks;
 using Verse;
@@ -40,7 +41,7 @@ namespace Multiplayer.Client
                 foreach (var file in files.Value.Values)
                 {
                     data.WriteString(file.relPath);
-                    data.WriteInt32(file.hash);
+                    data.WriteLong(file.hash);
                 }
             }
 
@@ -88,7 +89,7 @@ namespace Multiplayer.Client
                 for (int j = 0; j < fileCount; j++)
                 {
                     var relPath = data.ReadString();
-                    var hash = data.ReadInt32();
+                    var hash = data.ReadLong();
                     string absPath = null;
 
                     if (mod != null)
@@ -110,7 +111,10 @@ namespace Multiplayer.Client
                     var fileName = data.ReadString();
                     var contents = data.ReadString(MaxConfigContentLen);
 
-                    remoteInfo.remoteModConfigs.Add(new ModConfig(modId, fileName, contents));
+                    // Normalize remote XML too — covers servers that haven't been upgraded yet.
+                    // Doing this on both sides means whitespace/comment/attribute-order
+                    // differences never surface as a mismatch, regardless of the peer's build.
+                    remoteInfo.remoteModConfigs.Add(new ModConfig(modId, fileName, SyncConfigs.Normalize(contents)));
                     //remoteInfo.remoteModConfigs[trimmedPath] = remoteInfo.remoteModConfigs[trimmedPath].Insert(0, "a"); // for testing
                 }
             }
@@ -153,13 +157,13 @@ namespace Multiplayer.Client
                 foreach (var asm in MultiplayerData.GetModAssemblies(contentPack))
                 {
                     var relPath = asm.FullName.RemovePrefix(contentPack.RootDir).NormalizePath();
-                    fileDict.Add(modId, new ModFile(asm.FullName, relPath, asm.CRC32()));
+                    fileDict.Add(modId, new ModFile(asm.FullName, relPath, asm.Sha256First8()));
                 }
 
                 foreach (var xmlFile in GetModDefsAndPatches(contentPack))
                 {
                     var relPath = xmlFile.FullName.RemovePrefix(contentPack.RootDir).NormalizePath();
-                    fileDict.Add(modId, new ModFile(xmlFile.FullName, relPath, xmlFile.CRC32()));
+                    fileDict.Add(modId, new ModFile(xmlFile.FullName, relPath, xmlFile.Sha256First8()));
                 }
             }
 
@@ -291,9 +295,9 @@ namespace Multiplayer.Client
     {
         public string absPath; // Can be null on the remote side
         public string relPath;
-        public int hash;
+        public long hash; // First 8 bytes of SHA-256 (was CRC32 — see Extensions.Sha256First8)
 
-        public ModFile(string absPath, string relPath, int hash)
+        public ModFile(string absPath, string relPath, long hash)
         {
             this.absPath = absPath?.NormalizePath();
             this.relPath = relPath.NormalizePath();
@@ -312,7 +316,10 @@ namespace Multiplayer.Client
 
         public override int GetHashCode()
         {
-            return Gen.HashCombineInt(relPath.GetHashCode(), hash);
+            // StableHash.StringInt32 instead of relPath.GetHashCode(): the CLR's per-process
+            // randomized string hash gives correct in-process semantics but muddies any path
+            // where ModFile equality crosses a process boundary or persistence layer.
+            return Gen.HashCombineInt(StableHash.StringInt32(relPath), unchecked((int)hash));
         }
     }
 
