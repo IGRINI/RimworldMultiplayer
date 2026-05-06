@@ -92,6 +92,11 @@ namespace Multiplayer.Client
         // clears the cache so a session reload starts fresh.
         private static readonly Dictionary<int, ITickable> tickableLookup = new();
         private static Map[] tickableLookupKey = Array.Empty<Map>();
+        // World tickable lives outside Find.Maps but is also cached under TickableId == -1.
+        // It can be replaced (Find.World recreated, AsyncWorldTime returns a new instance)
+        // while map references stay the same — without tracking it explicitly, TickableById(-1)
+        // would return the previous world's component. Folded into the identity check below.
+        private static ITickable tickableLookupWorld;
 
         static Stopwatch updateTimer = Stopwatch.StartNew();
         public static Stopwatch tickTimer = Stopwatch.StartNew();
@@ -440,6 +445,7 @@ namespace Multiplayer.Client
             deferredCmds.Clear();
             tickableLookup.Clear();
             tickableLookupKey = Array.Empty<Map>();
+            tickableLookupWorld = null;
             TimeControlPatch.prePauseTimeSpeed = null;
             RoundMode.Reset();
         }
@@ -449,12 +455,16 @@ namespace Multiplayer.Client
         public static ITickable TickableById(int tickableId)
         {
             var maps = Find.Maps;
+            var currentWorld = Multiplayer.AsyncWorldTime;
 
-            // Identity check on actual Map references. uniqueID-based check would still pass
-            // when the engine reloads from save and produces fresh Map (and fresh AsyncTimeComp)
-            // instances with the same uniqueID — we'd return the previous world's tickable
-            // and route commands to a disposed object. ReferenceEquals catches that.
-            bool identityMatch = tickableLookupKey.Length == maps.Count;
+            // Identity check on actual references — both Map references AND the world tickable.
+            // uniqueID/count-only checks would still pass when the engine reloads from save and
+            // produces fresh instances with the same uniqueIDs, so we'd return the previous
+            // world's tickable and route commands to a disposed object. The zero-map / world-view
+            // case is the most pathological one for the world reference: same Map[] (empty), but
+            // a fresh AsyncWorldTimeComp that the cache would have nothing else to invalidate on.
+            bool identityMatch = ReferenceEquals(tickableLookupWorld, currentWorld)
+                                 && tickableLookupKey.Length == maps.Count;
             if (identityMatch)
             {
                 for (int i = 0; i < maps.Count; i++)
@@ -470,7 +480,8 @@ namespace Multiplayer.Client
             if (!identityMatch)
             {
                 tickableLookup.Clear();
-                tickableLookup[Multiplayer.AsyncWorldTime.TickableId] = Multiplayer.AsyncWorldTime;
+                tickableLookup[currentWorld.TickableId] = currentWorld;
+                tickableLookupWorld = currentWorld;
                 var newKey = new Map[maps.Count];
                 for (int i = 0; i < maps.Count; i++)
                 {

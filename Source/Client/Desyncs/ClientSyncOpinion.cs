@@ -50,12 +50,17 @@ namespace Multiplayer.Client
             //             whole mapStates list flat (or even just the mapId lists) creates
             //             false desyncs as soon as opinions are exchanged.
             //
-            // desyncStackTraceHashes is intentionally NOT load-bearing here. Traces are
-            // recorded on every Rand.PushState/PopState across both world ticks and per-map
-            // ticks; in streaming, the per-map ticks contribute scope-specific hashes that
-            // a peer without that map loaded simply doesn't generate. Trace hashes are still
-            // shipped on the wire and used by FindTraceHashesDiffTick in SyncCoordinator after
-            // a desync is detected through other means, to locate the divergence point.
+            // desyncStackTraceHashes is load-bearing ONLY when both opinions cover the same
+            // set of map scopes — see the trace check at the bottom. Trace hashes are recorded
+            // on every Rand.PushState/PopState across both world ticks and per-map ticks;
+            // in streaming with different loaded-map subsets the per-map traces contribute
+            // scope-specific hashes that a peer without that map simply doesn't generate, so
+            // a flat SequenceEqual would false-positive. With identical scopes (embedded host,
+            // or two streaming peers happening to have the same maps loaded) the check still
+            // catches the case where peers make the same number of RNG calls at different call
+            // sites — RNG-state checks alone wouldn't see that. Trace hashes are also shipped
+            // on the wire unconditionally so FindTraceHashesDiffTick in SyncCoordinator can
+            // locate the divergence point after a desync is detected.
             if (roundMode != other.roundMode)
                 return $"FP round mode doesn't match: {roundMode} != {other.roundMode}";
 
@@ -78,16 +83,32 @@ namespace Multiplayer.Client
 
             // Per-map intersection. Build a quick lookup from the other opinion so we don't
             // scan its list for every entry on our side.
-            Dictionary<int, List<uint>> otherByMapId = null;
+            var otherByMapId = BuildMapStateLookup(other);
             for (int i = 0; i < mapStates.Count; i++)
             {
                 var localMap = mapStates[i];
-                otherByMapId ??= BuildMapStateLookup(other);
                 if (!otherByMapId.TryGetValue(localMap.mapId, out var otherStates))
                     continue; // peer didn't have this map streamed in — nothing to compare
                 if (!localMap.randomStates.SequenceEqual(otherStates))
                     return $"Wrong random state on map {localMap.mapId}";
             }
+
+            // Trace hash check, gated on identical scope. We only run it when:
+            //   * neither side is simulating (catchup logging is intentionally noisy);
+            //   * both sides have non-empty trace hash lists (a side with empty traces
+            //     simply hasn't been collecting yet);
+            //   * both sides have the EXACT same set of mapIds in mapStates — i.e. the
+            //     scope of map-level RNG/trace activity is the same. With identical scope
+            //     the trace lists are directly comparable and a mismatch indicates the
+            //     same RNG count at different call sites (a class of desync the RNG-state
+            //     check alone cannot see). With different scope the lists legitimately
+            //     diverge in length / content and we'd false-positive — so we skip.
+            if (!simulating && !other.simulating
+                && desyncStackTraceHashes.Count > 0
+                && other.desyncStackTraceHashes.Count > 0
+                && SameMapScope(mapStates, otherByMapId)
+                && !desyncStackTraceHashes.SequenceEqual(other.desyncStackTraceHashes))
+                return "Trace hashes don't match";
 
             return null;
         }
@@ -98,6 +119,17 @@ namespace Multiplayer.Client
             for (int i = 0; i < op.mapStates.Count; i++)
                 dict[op.mapStates[i].mapId] = op.mapStates[i].randomStates;
             return dict;
+        }
+
+        // True iff `local` and `other` cover exactly the same set of mapIds. Tolerates list
+        // ordering differences (the producer adds entries in iteration order which can vary).
+        private static bool SameMapScope(List<MapRandomStateData> local, Dictionary<int, List<uint>> otherByMapId)
+        {
+            if (local.Count != otherByMapId.Count) return false;
+            for (int i = 0; i < local.Count; i++)
+                if (!otherByMapId.ContainsKey(local[i].mapId))
+                    return false;
+            return true;
         }
 
         public List<uint> GetRandomStatesForMap(int mapId)
