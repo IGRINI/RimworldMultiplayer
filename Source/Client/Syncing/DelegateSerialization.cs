@@ -70,7 +70,7 @@ public static class DelegateSerialization
             var fieldPaths = GetFields(targetType).ToArray();
             var fieldTypes = fieldPaths.Select(path => MpReflection.PathType(path)).ToArray();
 
-            target = Activator.CreateInstance(targetType);
+            target = ConstructorCache.CreateInstance(targetType);
 
             for (int i = 0; i < fieldPaths.Length; i++)
             {
@@ -80,7 +80,7 @@ public static class DelegateSerialization
                 object value;
 
                 if (fieldType.IsCompilerGenerated())
-                    value = Activator.CreateInstance(fieldType);
+                    value = ConstructorCache.CreateInstance(fieldType);
                 else if (typeof(Delegate).IsAssignableFrom(fieldType))
                     value = ReadDelegate(reader);
                 else

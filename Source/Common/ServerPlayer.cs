@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Linq;
 using Multiplayer.Common.Networking.Packet;
 
@@ -33,6 +34,34 @@ namespace Multiplayer.Common
         // Track which map the player is currently on
         public int currentMapId = -1;
         public bool hasReportedCurrentMap;
+
+        // --- Map streaming state (only used when MultiplayerServer.CanUseStandaloneMapStreaming is true). ---
+        // Maps the client has acknowledged loading via Client_MapLoaded. Cmds for these maps are sent
+        // immediately when no transfer is in flight.
+        public HashSet<int> loadedMapIds = new();
+        // Maps for which the server has sent a Server_MapResponse and is still awaiting the matching
+        // Client_MapLoaded ack. Multi-element to handle rapid PlayerCount switches: a second transition
+        // can start before the first ack arrives. A Client_MapLoaded(mapId) is only honoured if mapId is
+        // currently in this set — that gates the client from spuriously declaring arbitrary maps loaded.
+        // While this set is non-empty, ALL relevant cmds (globals, cmds for in-flight maps, cmds for
+        // already-loaded maps) are buffered into pendingMapCmds to preserve the strict server-order the
+        // client's Cmds queue depends on. Cmds for unrelated unloaded maps are still skipped (delivered
+        // later via MapResponse snapshot).
+        public HashSet<int> inFlightMapIds = new();
+        // Buffered Server_Command payloads (already serialized) waiting on the last in-flight map ack.
+        // Drained in arrival order once inFlightMapIds becomes empty.
+        public List<byte[]> pendingMapCmds = new();
+        // Hard cap on pendingMapCmds entries. A client that requests a map and never sends
+        // Client_MapLoaded would otherwise let the buffer grow until OOM. On reaching the cap,
+        // CommandHandler.Send schedules a disconnect for this player (terminal policy: silently
+        // dropping cmds would only produce a guaranteed desync). The latch prevents enqueueing
+        // the same disconnect twice while the action queue hasn't drained yet.
+        public const int MaxPendingMapCmds = 8192;
+        public bool pendingBufferOverflowed;
+        // Per-player count of Server_Command packets dispatched. Shipped to the client in ServerTimeControl
+        // so MultiplayerSession.ProcessTimeControl unfreezes the simulation only after the client has caught
+        // up to *its own* expected count (otherwise streaming-filtered cmds would freeze the client forever).
+        public int sentCmdsCount;
 
         public string Username => conn.username;
         public int Latency => conn.Latency;

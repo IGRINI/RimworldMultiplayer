@@ -150,10 +150,22 @@ namespace Multiplayer.Client
             byte[] mapData = GZipStream.UncompressBuffer(data.ReadPrefixedBytes());
             Session.dataSnapshot.MapData[mapId] = mapData;
 
+            // Capture the asyncTime flag now (main thread reads happen later inside the lambda).
+            bool forceAsyncTime = Multiplayer.game?.gameComp.asyncTime ?? false;
+
             OnMainThread.Enqueue(() =>
             {
                 var mapsToLoad = Find.Maps.Select(m => m.uniqueID).Append(mapId).Distinct().ToList();
-                Loader.ReloadGame(mapsToLoad, false, Multiplayer.game?.gameComp.asyncTime ?? false);
+                // Use the customPostLoadAction overload: it runs after Loader.PostLoad on the main
+                // thread, which is when the new map is in Find.Maps and dispatchable by
+                // TickPatch.TickableById. Sending Client_MapLoaded earlier would race the load and
+                // the server might unbuffer cmds for a map the client can't yet route to.
+                Loader.ReloadGame(mapsToLoad, false, () =>
+                {
+                    if (forceAsyncTime) Multiplayer.game.gameComp.asyncTime = true;
+                    if (Multiplayer.Client != null)
+                        Multiplayer.Client.Send(new ClientMapLoadedPacket(mapId));
+                });
             });
         }
 

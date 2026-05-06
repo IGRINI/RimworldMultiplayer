@@ -1,11 +1,35 @@
 using System.Collections.Generic;
 using System.Linq;
+using Multiplayer.Common.Networking;
 using Multiplayer.Common.Networking.Packet;
 
 namespace Multiplayer.Common
 {
     public class ServerPlayingState(ConnectionBase conn) : MpConnectionState(conn)
     {
+        // Once a player overflows their streaming buffer they are terminal: a Disconnect is queued
+        // on Server.Enqueue and runs on the next action-queue drain. Until that drain, packets keep
+        // arriving and any handler we run is a state-mutation path that defeats the disconnect
+        // (auth checks alone don't help — host/arbiter overflow is possible). Override the
+        // dispatch lookup so EVERY non-fragmented packet from a terminal player is consumed by a
+        // no-op until the disconnect actually fires. The reader is seeked to the end so
+        // HandleReceiveRaw doesn't log "Packet was not fully consumed".
+        //
+        // Fragment is intentionally false: an attacker could otherwise trigger HandleReceiveFragment
+        // with arbitrary packet ids and allocate up to MaxFragmentPacketTotalSize for a
+        // FragmentedPacket buffer in the disconnect window. With Fragment=false a fragmented packet
+        // from a terminal player throws PacketReadException immediately, which escalates to the
+        // existing ServerPacketRead disconnect path — same destination, no allocation.
+        private static readonly PacketHandlerInfo TerminalNoOp =
+            new((object target, ByteReader data) => data.Seek(data.Length), Fragment: false);
+
+        public override PacketHandlerInfo? GetPacketHandler(Packets id)
+        {
+            if (connection.serverPlayer is { pendingBufferOverflowed: true })
+                return TerminalNoOp;
+            return base.GetPacketHandler(id);
+        }
+
         [PacketHandler(Packets.Client_WorldReady)]
         public void HandleWorldReady(ByteReader data)
         {
@@ -15,6 +39,23 @@ namespace Multiplayer.Common
         [PacketHandler(Packets.Client_RequestRejoin)]
         public void HandleRejoin(ByteReader data)
         {
+            // Terminal: overflow Disconnect already queued. Honouring rejoin in this gap would
+            // reset the latch and put the player back into a fresh loading flow, defeating the
+            // disconnect. Drop the request — the queued Disconnect will close the connection on
+            // the next action-queue drain; the client can then start a new connection cleanly.
+            if (Player.pendingBufferOverflowed) return;
+
+            // Rejoin throws away the client's whole world (it'll receive a fresh Server_WorldData
+            // and Loader.ReloadGame from scratch), so any maps it had loaded before are gone. Clear
+            // the streaming mirror or the server keeps thinking those maps are loaded — the next
+            // PlayerCount on such a map would skip MapResponse and route map-scoped cmds to a
+            // client that has no map data again. Counter and buffer get re-seeded by SendWorldData.
+            Player.loadedMapIds.Clear();
+            Player.inFlightMapIds.Clear();
+            Player.pendingMapCmds.Clear();
+            Player.pendingBufferOverflowed = false;
+            Player.sentCmdsCount = 0;
+
             connection.ChangeState(ConnectionStateEnum.ServerLoading);
             Player.ResetTimeVotes();
         }
@@ -26,13 +67,19 @@ namespace Multiplayer.Common
         [TypedPacketHandler]
         public void HandleTraces(ClientTracesPacket packet)
         {
-            if (!Player.IsHost) return;
+            if (!RequireHost()) return;
             Server.GetPlayer(packet.playerId)?.SendPacket(ServerTracesPacket.Transfer(packet.rawTraces, packet.rawJittedMethods));
         }
 
         [TypedPacketHandler]
         public void HandleClientCommand(ClientCommandPacket packet)
         {
+            // Terminal: overflow Disconnect queued. Reject before any state mutation. Without this,
+            // a PlayerCount packet in the gap would still set currentMapId/hasReportedCurrentMap,
+            // add to inFlightMapIds, and trigger SendMapResponse — bypassing the per-recipient
+            // guard in CommandHandler.Send (which only fires after these mutations).
+            if (Player.pendingBufferOverflowed) return;
+
             int? mapToResync = null;
 
             if (packet.type == CommandType.PlayerCount)
@@ -46,8 +93,18 @@ namespace Multiplayer.Common
                 Player.currentMapId = newMapId;
                 Player.hasReportedCurrentMap = true;
 
-                if (Server.CanUseStandaloneMapStreaming(newMapId))
+                // Streaming: schedule a MapResponse iff this is a streamable mapId the player doesn't
+                // already have loaded AND isn't already in flight. inFlightMapIds.Add returns false
+                // if the entry was already present — that handles a duplicate PlayerCount(→same map)
+                // arriving before the original ack: we keep the original in-flight request and the
+                // ack-when-it-comes settles it once. A second MapResponse + subsequent ack would
+                // reload the client unnecessarily.
+                if (Server.CanUseStandaloneMapStreaming(newMapId)
+                    && !Player.loadedMapIds.Contains(newMapId)
+                    && Player.inFlightMapIds.Add(newMapId))
+                {
                     mapToResync = newMapId;
+                }
             }
 
             // todo check if map id is valid for the player
@@ -58,7 +115,49 @@ namespace Multiplayer.Common
                 Server.SendMapResponse(Player, currentMapId);
         }
 
+        [TypedPacketHandler]
+        public void HandleMapLoaded(ClientMapLoadedPacket packet)
+        {
+            int mapId = packet.mapId;
+            if (mapId < 0) return; // sanity: sentinels never reach this path
+
+            // Terminal: an overflow Disconnect is already queued for this player. Acks arriving in
+            // the window before the action-queue drain must NOT drain the partial buffer or clear
+            // the latch — that would re-open live routing in the gap and deliver a truncated cmd
+            // stream. Drop quietly; the queued Disconnect will close the connection shortly.
+            if (Player.pendingBufferOverflowed) return;
+
+            // Only honour acks for maps the server actually requested. inFlightMapIds.Remove returns
+            // false if mapId wasn't tracked — that covers stale duplicates AND unsolicited/malicious
+            // acks. Without this gate the client could mark arbitrary maps as loaded and have
+            // future map-scoped cmds routed to it without the data ever being sent.
+            if (!Player.inFlightMapIds.Remove(mapId))
+                return;
+
+            Player.loadedMapIds.Add(mapId);
+
+            // Drain only when the LAST in-flight transfer settles. Rapid switches that left several
+            // requests in flight still produce a single ordered drain at the end of the chain — the
+            // buffered stream covers all transitions and replays in arrival order.
+            if (Player.inFlightMapIds.Count > 0) return;
+
+            if (Player.pendingMapCmds.Count > 0)
+            {
+                foreach (var raw in Player.pendingMapCmds)
+                {
+                    Player.conn.Send(new SerializedPacket(Packets.Server_Command, raw), true);
+                    Player.sentCmdsCount++;
+                }
+                Player.pendingMapCmds.Clear();
+            }
+        }
+
         public const int MaxChatMsgLength = 128;
+
+        private const int MaxMapsCount = 64;
+        private const int MaxMapDataBytes = 16 * 1024 * 1024;
+        private const int MaxSavedGameBytes = 16 * 1024 * 1024;
+        private const int MaxSessionDataBytes = 4 * 1024 * 1024;
 
         [TypedPacketHandler]
         public void HandleChat(ClientChatPacket packet)
@@ -83,22 +182,29 @@ namespace Multiplayer.Common
         [PacketHandler(Packets.Client_WorldDataUpload, allowFragmented: true)]
         public void HandleWorldDataUpload(ByteReader data)
         {
-            if (Server.ArbiterPlaying ? !Player.IsArbiter : !Player.IsHost) // policy
-                return;
+            if (!RequireArbiterOrHost()) return;
 
             ServerLog.Log($"Got world upload {data.Left}");
 
-            Server.worldData.mapData = new Dictionary<int, byte[]>();
-
             int maps = data.ReadInt32();
+            if (maps < 0 || maps > MaxMapsCount)
+                throw new ReaderException($"Too many maps ({maps}>{MaxMapsCount})");
+
+            // Parse into locals first so a rejection mid-stream doesn't leave worldData with empty
+            // mapData while savedGame/sessionData still hold the previous snapshot.
+            var mapData = new Dictionary<int, byte[]>(maps);
             for (int i = 0; i < maps; i++)
             {
                 int mapId = data.ReadInt32();
-                Server.worldData.mapData[mapId] = data.ReadPrefixedBytes();
+                mapData[mapId] = data.ReadPrefixedBytes(MaxMapDataBytes);
             }
 
-            Server.worldData.savedGame = data.ReadPrefixedBytes();
-            Server.worldData.sessionData = data.ReadPrefixedBytes();
+            var savedGame = data.ReadPrefixedBytes(MaxSavedGameBytes);
+            var sessionData = data.ReadPrefixedBytes(MaxSessionDataBytes);
+
+            Server.worldData.mapData = mapData;
+            Server.worldData.savedGame = savedGame;
+            Server.worldData.sessionData = sessionData;
 
             if (Server.worldData.CreatingJoinPoint)
                 Server.worldData.EndJoinPointCreation();
@@ -141,14 +247,16 @@ namespace Multiplayer.Common
         [TypedPacketHandler]
         public void HandleDesyncCheck(ClientSyncInfoPacket packet)
         {
-            var arbiter = Server.ArbiterPlaying;
-            if (arbiter ? !Player.IsArbiter : !Player.IsHost) return; // policy
+            if (!RequireArbiterOrHost()) return;
 
             // Keep at most 10 sync infos
             Server.worldData.syncInfos.Add(packet.rawSyncOpinion);
             if (Server.worldData.syncInfos.Count > 10)
                 Server.worldData.syncInfos.RemoveAt(0);
 
+            // The arbiter, when present, is the authoritative source - so don't forward
+            // its opinion to itself, and forward to the host only when no arbiter is playing.
+            var arbiter = Server.ArbiterPlaying;
             foreach (var p in Server.PlayingPlayers.Where(p => !p.IsArbiter && (arbiter || !p.IsHost)))
                 p.conn.SendFragmented(new ServerSyncInfoPacket { rawSyncOpinion = packet.rawSyncOpinion }.Serialize());
         }
@@ -173,7 +281,7 @@ namespace Multiplayer.Common
         [TypedPacketHandler]
         public void HandleDebug(ClientDebugPacket _)
         {
-            // todo restrict handling
+            if (!RequireDevMode()) return;
 
             Server.worldData.mapCmds.Clear();
             Server.gameTimer = Server.startingTimer;
@@ -184,10 +292,10 @@ namespace Multiplayer.Common
         [TypedPacketHandler]
         public void HandleSetFaction(ClientSetFactionPacket packet)
         {
-            // todo restrict handling
-
             int playerId = packet.playerId;
             int factionId = packet.factionId;
+
+            if (!CanSetFactionOf(playerId)) return;
 
             var player = Server.GetPlayer(playerId);
             if (player == null) return;
@@ -196,6 +304,10 @@ namespace Multiplayer.Common
             player.FactionId = factionId;
             Server.SendToPlaying(new ServerSetFactionPacket(playerId, factionId));
         }
+
+        // Players may change their own faction; only the host may change another player's faction.
+        private bool CanSetFactionOf(int targetPlayerId) =>
+            targetPlayerId == Player.id || Player.IsHost;
 
         [TypedPacketHandler]
         public void HandleFrameTime(ClientFrameTimePacket packet) => Player.frameTime = packet.frameTime;

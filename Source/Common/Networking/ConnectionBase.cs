@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using Multiplayer.Common.Networking.Packet;
 
@@ -58,11 +59,24 @@ namespace Multiplayer.Common
             if (message.Length > MaxSinglePacketSize)
                 throw new PacketSendException($"Packet {id} too big for sending ({message.Length}>{MaxSinglePacketSize})");
 
-            byte[] full = new byte[1 + message.Length];
-            full[0] = (byte)(Convert.ToByte(id) & 0x3F);
-            message.CopyTo(full, 1);
+            int totalLen = 1 + message.Length;
 
-            SendRaw(full, reliable);
+            // Rent a header+payload buffer from the pool and use the length-aware SendRaw overload.
+            // Implementations that copy the bytes (LiteNet, Steam, NoOp recorders) override the
+            // length-aware overload and use only [0..length). LocalConnection (in-memory loopback)
+            // retains a reference to the array via ByteReader, so it stays on the byte[]-sized
+            // overload, which the base implementation services with a tight new byte[length].
+            byte[] full = ArrayPool<byte>.Shared.Rent(totalLen);
+            try
+            {
+                full[0] = (byte)(Convert.ToByte(id) & 0x3F);
+                Buffer.BlockCopy(message, 0, full, 1, message.Length);
+                SendRaw(full, totalLen, reliable);
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(full);
+            }
         }
 
         // Steam doesn't like messages bigger than a megabyte
@@ -141,6 +155,25 @@ namespace Multiplayer.Common
         public void SendFragmented(SerializedPacket packet) => SendFragmented(packet.id, packet.data);
 
         protected abstract void SendRaw(byte[] raw, bool reliable = true);
+
+        // Length-aware overload. Implementations whose underlying transport copies the bytes
+        // (LiteNet, Steam, Recording/Dummy test stubs) override this to avoid allocating a tightly
+        // sized byte[] when callers pass a pooled buffer. The default forwards to SendRaw(byte[],
+        // bool) for implementations that need to retain the array (e.g. LocalConnection wrapping
+        // it in a ByteReader for deferred handling).
+        protected virtual void SendRaw(byte[] raw, int length, bool reliable)
+        {
+            if (raw.Length == length)
+            {
+                SendRaw(raw, reliable);
+            }
+            else
+            {
+                byte[] exact = new byte[length];
+                Buffer.BlockCopy(raw, 0, exact, 0, length);
+                SendRaw(exact, reliable);
+            }
+        }
 
         public virtual void HandleReceiveRaw(ByteReader data, bool reliable)
         {

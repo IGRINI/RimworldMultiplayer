@@ -7,10 +7,15 @@ namespace Multiplayer.Common
     {
         public readonly NetPeer peer = peer;
 
-        protected override void SendRaw(byte[] raw, bool reliable)
+        protected override void SendRaw(byte[] raw, bool reliable) => SendRaw(raw, raw.Length, reliable);
+
+        protected override void SendRaw(byte[] raw, int length, bool reliable)
         {
+            // LiteNetLib's NetPeer.Send copies the payload into a pooled NetPacket via
+            // Buffer.BlockCopy before queuing, so we can hand it a buffer rented from
+            // ArrayPool<byte>.Shared and free it immediately after this call returns.
             if (peer.ConnectionState == ConnectionState.Connected)
-                peer.Send(raw, reliable ? DeliveryMethod.ReliableOrdered : DeliveryMethod.Unreliable);
+                peer.Send(raw, 0, length, reliable ? DeliveryMethod.ReliableOrdered : DeliveryMethod.Unreliable);
             else
                 ServerLog.Error($"SendRaw() called with invalid connection state ({peer}): {peer.ConnectionState}");
         }

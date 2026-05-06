@@ -179,12 +179,16 @@ public sealed class PacketReader(ByteReader reader) : PacketBuffer(false)
     public override void BindBytes(ref byte[] obj, int maxLength = DefaultMaxLength)
     {
         int len = reader.ReadInt32();
+        if (len < 0) throw new ReaderException($"Bytes length ({len}<0)");
+        if (len > maxLength && maxLength != -1) throw new ReaderException($"Bytes too big ({len}>{maxLength})");
+        if (len > reader.Left) throw new ReaderException($"Bytes length exceeds remaining buffer ({len}>{reader.Left})");
         obj = reader.ReadRaw(len);
     }
 
     public override void Bind<T>(ref T[] obj, Binder<T> bind, int maxLength = DefaultMaxLength)
     {
         int len = reader.ReadInt32();
+        if (len < 0) throw new ReaderException($"Array length ({len}<0)");
         if (len > maxLength && maxLength != -1) throw new ReaderException($"Array too big ({len}>{maxLength})");
 
         obj = new T[len];
@@ -205,6 +209,7 @@ public sealed class PacketReader(ByteReader reader) : PacketBuffer(false)
     public override void Bind<T>(ref List<T> obj, Binder<T> bind, int maxLength = DefaultMaxLength)
     {
         int len = reader.ReadInt32();
+        if (len < 0) throw new ReaderException($"List length ({len}<0)");
         if (len > maxLength) throw new ReaderException($"List too big ({len}>{maxLength})");
 
         obj = new List<T>(len);
@@ -220,6 +225,7 @@ public sealed class PacketReader(ByteReader reader) : PacketBuffer(false)
         int maxLength = DefaultMaxLength)
     {
         int len = reader.ReadInt32();
+        if (len < 0) throw new ReaderException($"Dictionary length ({len}<0)");
         if (len > maxLength && maxLength != -1) throw new ReaderException($"Dictionary too big ({len}>{maxLength})");
 
         obj = new Dictionary<K, V>(len);

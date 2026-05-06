@@ -165,9 +165,41 @@ namespace Multiplayer.Client
             Shader.SetGlobalFloat(ShaderPropertyIDs.GameSeconds, Find.CurrentMap.AsyncTime().mapTicks.TicksToSeconds());
         }
 
+        // Defensive buffer for cmds that arrive before their target tickable exists. With the
+        // streaming protocol the server only sends map-scoped cmds after Client_MapLoaded ack, so
+        // this should always be empty during normal play. If it grows we have a server bug — the
+        // log line below makes that loud rather than silently dropping the cmd.
+        private static readonly List<ScheduledCommand> deferredCmds = new();
+
         private static bool RunCmds()
         {
             int curTimer = Timer;
+
+            // Re-attempt deferred cmds first: target might have appeared since last call. We can only
+            // execute a deferred cmd when its tick matches the current Timer — running it on a later
+            // tick would diverge from peers (deterministic desync). If the tick has already passed,
+            // there is no recovery: drop with a loud error so the bug is investigated, and rely on
+            // SyncCoordinator's hash check to flag the resulting state divergence as a desync.
+            if (deferredCmds.Count > 0)
+            {
+                for (int i = deferredCmds.Count - 1; i >= 0; i--)
+                {
+                    var cmd = deferredCmds[i];
+                    var target = TickableById(cmd.mapId);
+                    if (target == null) continue;          // still missing; keep waiting
+                    if (cmd.ticks > curTimer) continue;    // not yet time; keep deferred
+                    deferredCmds.RemoveAt(i);
+                    if (cmd.ticks < curTimer)
+                    {
+                        // Deterministic desync waiting to happen. Drop and let SyncCoordinator catch
+                        // the divergence on the next opinion exchange rather than silently applying
+                        // it on the wrong tick.
+                        Log.Error($"!!! Late deferred cmd dropped (cmd.ticks={cmd.ticks}, curTimer={curTimer}, mapId={cmd.mapId}, type={cmd.type})");
+                        continue;
+                    }
+                    target.ExecuteCmd(cmd);
+                }
+            }
 
             foreach (ITickable tickable in AllTickables)
             {
@@ -179,7 +211,18 @@ namespace Multiplayer.Client
                     var target = TickableById(cmd.mapId);
                     if (target == null)
                     {
-                        Log.Error($"!!! Tickable of {cmd.mapId} not found! {cmd}");
+                        if (cmd.mapId >= 0)
+                        {
+                            // Streaming server bug or map not yet loaded race. Stash and retry later
+                            // rather than dropping silently. ScheduleCommand on the streaming path
+                            // shouldn't deliver cmds for unloaded maps, so this is defense-in-depth.
+                            Log.Warning($"Tickable for mapId {cmd.mapId} not found, deferring cmd: {cmd}");
+                            deferredCmds.Add(cmd);
+                        }
+                        else
+                        {
+                            Log.Error($"!!! Tickable of {cmd.mapId} not found! {cmd}");
+                        }
                     } else target.ExecuteCmd(cmd);
 
                     if (LongEventHandler.eventQueue.Count > 0) return true; // Yield to e.g. join-point creation
@@ -308,6 +351,7 @@ namespace Multiplayer.Client
             serverTimePerTick = 0;
             avgFrameTime = StandardTimePerFrame;
             realTime = 0;
+            deferredCmds.Clear();
             TimeControlPatch.prePauseTimeSpeed = null;
         }
 

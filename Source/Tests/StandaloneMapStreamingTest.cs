@@ -12,6 +12,9 @@ public class StandaloneMapStreamingTest
     [SetUp]
     public void SetUp()
     {
+        // These tests cover the streaming-OFF code paths: command broadcast and the transition
+        // flow that does NOT trigger Server_MapResponse. Mirrored ON tests live in
+        // StandaloneMapStreamingEnabledTest.cs.
         server = MultiplayerServer.instance = new MultiplayerServer(new ServerSettings
         {
             gameName = "Test",
@@ -19,7 +22,7 @@ public class StandaloneMapStreamingTest
             lan = false
         })
         {
-            IsStandaloneServer = true,
+            IsStandaloneServer = false,
         };
         nextPlayerId = 1;
     }

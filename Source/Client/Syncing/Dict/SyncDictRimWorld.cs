@@ -524,7 +524,7 @@ namespace Multiplayer.Client
             },
             {
                 (ByteWriter data, ITab_ContentsBase tab) => WriteSync(data, tab.GetType()),
-                (ByteReader data) => (ITab_ContentsBase)Activator.CreateInstance(ReadSync<Type>(data)),
+                (ByteReader data) => (ITab_ContentsBase)ConstructorCache.CreateInstance(ReadSync<Type>(data)),
                 true // Implicit
             },
             {

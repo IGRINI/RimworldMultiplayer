@@ -82,7 +82,7 @@ namespace Multiplayer.Client
 
         protected override object ReadTarget(ByteReader data)
         {
-            object target = Activator.CreateInstance(targetType);
+            object target = ConstructorCache.CreateInstance(targetType);
 
             for (int i = 0; i < fieldPaths.Length; i++)
             {
@@ -94,7 +94,7 @@ namespace Multiplayer.Client
                 if (fieldTransformers[i] is SyncTransformer tr)
                     value = tr.reader.DynamicInvoke(SyncSerialization.ReadSyncObject(data, tr.networkType));
                 else if (fieldType.IsCompilerGenerated())
-                    value = Activator.CreateInstance(fieldType);
+                    value = ConstructorCache.CreateInstance(fieldType);
                 else
                 {
                     SyncType type = fieldType;

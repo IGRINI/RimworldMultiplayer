@@ -119,26 +119,33 @@ namespace Multiplayer.Common
                     int ticked = 0;
                     while (realTime > 0 && ticked < 2)
                     {
+                        // Single pass over all players: collect everything the tick needs in one go
+                        // to avoid LINQ allocations and multiple enumerator creations per tick.
                         playersBehind.Clear();
-                        playersBehind.AddRange(PlayingIngamePlayers.Where(p => p.ExtrapolatedTicksBehind > 90));
-                        if (!freezeManager.Frozen &&
-                            PlayingPlayers.Any(p => p.ExtrapolatedTicksBehind < 40) &&
-                            !playersBehind.Any())
+                        bool anyExtrapolatedNear = false;
+                        int maxTicksBehind = 0;
+                        foreach (var p in playerManager.Players)
+                        {
+                            if (!p.IsPlaying) continue;
+                            if (p.ExtrapolatedTicksBehind < 40) anyExtrapolatedNear = true;
+                            if (p.status != PlayerStatus.Playing) continue;
+                            if (p.ExtrapolatedTicksBehind > 90) playersBehind.Add(p);
+                            if (p.ticksBehind > maxTicksBehind) maxTicksBehind = p.ticksBehind;
+                        }
+
+                        if (!freezeManager.Frozen && anyExtrapolatedNear && playersBehind.Count == 0)
                         {
                             gameTimer++;
                             sentCmdsSnapshot = commands.SentCmds;
                         }
-                        else if (playersBehind.Any())
+                        else if (playersBehind.Count > 0)
                         {
                             var text = playersBehind.Join(p => $"{p.Username}");
                             ServerLog.Log($"Simulation paused because some players are too far behind: {text}");
                         }
 
                         // Run up to three times slower depending on max ticksBehind
-                        var slowdown = Math.Min(
-                            PlayingIngamePlayers.MaxOrZero(p => p.ticksBehind) / 60f,
-                            2f
-                        );
+                        var slowdown = Math.Min(maxTicksBehind / 60f, 2f);
                         realTime -= serverTimePerTick * (1f + slowdown);
 
                         ticked++;
@@ -189,9 +196,33 @@ namespace Multiplayer.Common
 
             // Send to simulating players as well to update the simulation window for them and actually update further
             // during the same simulation.
-            SendToPlaying(new ServerTimeControlPacket(gameTimer, sentCmdsSnapshot, serverTimePerTick), false);
+            //
+            // When streaming, each player has their own sentCmdsCount that reflects exactly how many
+            // Server_Command packets we've actually pushed onto their wire. ProcessTimeControl on the
+            // client compares receivedCmds against the value in this packet, so they MUST be the
+            // per-player count — using the global sentCmdsSnapshot would freeze the simulation
+            // window for any player whose map-scoped cmds were filtered/buffered.
+            //
+            // For the embedded host (non-streaming) every player gets every cmd, so the global
+            // counter is correct and we keep the single broadcast send.
+            if (IsStandaloneServer)
+            {
+                foreach (var p in playerManager.Players)
+                {
+                    if (!p.IsPlaying) continue;
+                    p.conn.Send(new ServerTimeControlPacket(gameTimer, p.sentCmdsCount, serverTimePerTick), false);
+                }
+            }
+            else
+            {
+                SendToPlaying(new ServerTimeControlPacket(gameTimer, sentCmdsSnapshot, serverTimePerTick), false);
+            }
 
-            serverTimePerTick = PlayingIngamePlayers.MaxOrZero(p => p.frameTime);
+            float maxFrameTime = 0f;
+            foreach (var p in playerManager.Players)
+                if (p.IsPlaying && p.status == PlayerStatus.Playing && p.frameTime > maxFrameTime)
+                    maxFrameTime = p.frameTime;
+            serverTimePerTick = maxFrameTime;
 
             if (serverTimePerTick < StandardTimePerTick)
                 serverTimePerTick = StandardTimePerTick;
@@ -231,11 +262,26 @@ namespace Multiplayer.Common
                     player.conn.Send(serialized, reliable);
         }
 
-        public bool CanUseStandaloneMapStreaming(int mapId) => false;
+        // Streaming gate: only standalone (non-embedded) servers stream maps lazily, and the mapId
+        // must be a real, server-tracked map. mapId < 0 (Global, world view, disconnect sentinel)
+        // and unknown ids fall through to legacy broadcast paths or are rejected by SendMapResponse.
+        // The protocol pieces that make this safe:
+        //  - Per-player loadedMapIds / pendingMapId / pendingMapCmds gate Server_Command sends so a
+        //    cmd never reaches a client before that client has the map loaded (CommandHandler.Send).
+        //  - Client_MapLoaded ack drains buffered cmds in order once Loader.ReloadGame finishes
+        //    (ServerPlayingState.HandleMapLoaded).
+        //  - Per-player sentCmdsCount in ServerTimeControl keeps ProcessTimeControl from freezing
+        //    the client while filtered cmds are in flight (MultiplayerServer.TickNet).
+        public bool CanUseStandaloneMapStreaming(int mapId) =>
+            IsStandaloneServer && mapId >= 0 && worldData.mapData.ContainsKey(mapId);
 
         public void SendMapResponse(ServerPlayer player, int mapId)
         {
             if (!CanUseStandaloneMapStreaming(mapId))
+                return;
+            // Defense-in-depth: even if streaming gets re-enabled with a global flag, never index
+            // worldData.mapData with an id that isn't tracked — that would throw and disconnect.
+            if (mapId < 0 || !worldData.mapData.ContainsKey(mapId))
                 return;
 
             ByteWriter writer = new ByteWriter();

@@ -17,11 +17,15 @@ namespace Multiplayer.Client.Networking
         public readonly ushort recvChannel = recvChannel; // currently only for client
         public readonly ushort sendChannel = sendChannel; // currently only for server
 
-        protected override void SendRaw(byte[] raw, bool reliable = true)
+        protected override void SendRaw(byte[] raw, bool reliable = true) => SendRaw(raw, raw.Length, reliable);
+
+        protected override void SendRaw(byte[] raw, int length, bool reliable)
         {
-            byte[] full = new byte[1 + raw.Length];
+            // SteamNetworking.SendP2PPacket copies the bytes internally before queuing, so feeding
+            // it a pooled buffer (with length covering only [0..length)) is safe.
+            byte[] full = new byte[1 + length];
             full[0] = reliable ? (byte)2 : (byte)0;
-            raw.CopyTo(full, 1);
+            Buffer.BlockCopy(raw, 0, full, 1, length);
 
             SendRawSteam(full, reliable);
         }

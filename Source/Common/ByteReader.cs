@@ -1,4 +1,5 @@
 using System;
+using System.Buffers.Binary;
 using System.Text;
 
 namespace Multiplayer.Common
@@ -25,23 +26,51 @@ namespace Multiplayer.Common
 
         public virtual sbyte ReadSByte() => (sbyte)array[IncrementIndex(1)];
 
-        public virtual short ReadShort() => BitConverter.ToInt16(array, IncrementIndex(2));
+        public virtual short ReadShort() =>
+            BinaryPrimitives.ReadInt16LittleEndian(new ReadOnlySpan<byte>(array, IncrementIndex(2), 2));
 
-        public virtual ushort ReadUShort() => BitConverter.ToUInt16(array, IncrementIndex(2));
+        public virtual ushort ReadUShort() =>
+            BinaryPrimitives.ReadUInt16LittleEndian(new ReadOnlySpan<byte>(array, IncrementIndex(2), 2));
 
-        public virtual int ReadInt32() => BitConverter.ToInt32(array, IncrementIndex(4));
+        public virtual int ReadInt32() =>
+            BinaryPrimitives.ReadInt32LittleEndian(new ReadOnlySpan<byte>(array, IncrementIndex(4), 4));
 
-        public virtual uint ReadUInt32() => BitConverter.ToUInt32(array, IncrementIndex(4));
+        public virtual uint ReadUInt32() =>
+            BinaryPrimitives.ReadUInt32LittleEndian(new ReadOnlySpan<byte>(array, IncrementIndex(4), 4));
 
-        public virtual long ReadLong() => BitConverter.ToInt64(array, IncrementIndex(8));
+        public virtual long ReadLong() =>
+            BinaryPrimitives.ReadInt64LittleEndian(new ReadOnlySpan<byte>(array, IncrementIndex(8), 8));
 
-        public virtual ulong ReadULong() => BitConverter.ToUInt64(array, IncrementIndex(8));
+        public virtual ulong ReadULong() =>
+            BinaryPrimitives.ReadUInt64LittleEndian(new ReadOnlySpan<byte>(array, IncrementIndex(8), 8));
 
-        public virtual float ReadFloat() => BitConverter.ToSingle(array, IncrementIndex(4));
+        public virtual float ReadFloat()
+        {
+            int bits = BinaryPrimitives.ReadInt32LittleEndian(new ReadOnlySpan<byte>(array, IncrementIndex(4), 4));
+#if NET48
+            return new IntFloatUnion(bits).Float;
+#else
+            return BitConverter.Int32BitsToSingle(bits);
+#endif
+        }
 
-        public virtual double ReadDouble() => BitConverter.ToDouble(array, IncrementIndex(8));
+        public virtual double ReadDouble()
+        {
+            long bits = BinaryPrimitives.ReadInt64LittleEndian(new ReadOnlySpan<byte>(array, IncrementIndex(8), 8));
+            return BitConverter.Int64BitsToDouble(bits);
+        }
 
-        public virtual bool ReadBool() => BitConverter.ToBoolean(array, IncrementIndex(1));
+        public virtual bool ReadBool() => array[IncrementIndex(1)] != 0;
+
+#if NET48
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Explicit)]
+        private readonly struct IntFloatUnion
+        {
+            [System.Runtime.InteropServices.FieldOffset(0)] public readonly int Int;
+            [System.Runtime.InteropServices.FieldOffset(0)] public readonly float Float;
+            public IntFloatUnion(int i) : this() { Int = i; }
+        }
+#endif
 
         public virtual string? ReadStringNullable(int maxLen = DefaultMaxStringLen)
         {

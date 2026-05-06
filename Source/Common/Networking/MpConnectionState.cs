@@ -14,6 +14,18 @@ namespace Multiplayer.Common
         protected ServerPlayer Player => connection.serverPlayer;
         protected MultiplayerServer Server => MultiplayerServer.instance!;
 
+        // Server-side handler policy gates. Return true if the calling player is allowed
+        // to invoke the handler. On false the caller is expected to silently return - the
+        // project convention for policy violations is a quiet no-op, not a disconnect.
+        protected bool RequireHost() => Player.IsHost;
+
+        // When the arbiter is connected and playing, only it produces authoritative
+        // world/desync data (the host defers to it). Otherwise the host stands in.
+        protected bool RequireArbiterOrHost() =>
+            Server.ArbiterPlaying ? Player.IsArbiter : Player.IsHost;
+
+        protected bool RequireDevMode() => Server.commands.CanUseDevMode(Player);
+
         public virtual void StartState()
         {
         }

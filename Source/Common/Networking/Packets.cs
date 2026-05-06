@@ -70,6 +70,9 @@ public enum Packets : byte
     Client_BootstrapSave,
     Server_Bootstrap,
 
+    // New entries must go at the end (before Count) to keep the on-wire ids of existing packets stable.
+    Client_MapLoaded,
+
     Count,
     Max = 63 // max packet id
 }
