@@ -9,6 +9,9 @@ public class TestJoiningState : AsyncConnectionState
     {
     }
 
+    [TypedPacketHandler]
+    public void HandleKeepAlive(ServerKeepAlivePacket packet) { }
+
     private const string RwVersion = "1.0.0";
 
     protected override async Task RunState()
@@ -27,7 +30,7 @@ public class TestJoiningState : AsyncConnectionState
             modCtorRoundMode = RoundModeEnum.ToNearest,
             staticCtorRoundMode = RoundModeEnum.ToNearest,
             defInfos = [],
-            rawData = []
+            rawMods = []
         });
 
         var p = await Packet(Packets.Server_UsernameOk);

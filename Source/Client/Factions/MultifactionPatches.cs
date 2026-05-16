@@ -1,4 +1,5 @@
 using HarmonyLib;
+using KTrie;
 using Multiplayer.API;
 using Multiplayer.Client.Factions;
 using RimWorld;
@@ -8,6 +9,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Reflection.Emit;
+using System.Runtime.Remoting.Messaging;
 using UnityEngine;
 using Verse;
 using Verse.AI;
@@ -29,7 +31,7 @@ public static class MainTabWindow_QuestsDoRowPatch
                 Rect iconRect = new Rect(rect.x + 2f, rect.y + 2f, 4f, rect.height - 4f);
                 Widgets.DrawBoxSolid(iconRect, playerFaction.Color);
                 rect.xMin += 8f;
-                TooltipHandler.TipRegion(rect,"MpQuestDesc".Translate(playerFaction.Name, playerFaction == Faction.OfPlayer ? ". (you)" : "."));
+                TooltipHandler.TipRegion(rect, "MpQuestDesc".Translate(playerFaction.Name, playerFaction == Faction.OfPlayer ? ". (you)" : "."));
             }
             else
             {
@@ -299,7 +301,7 @@ static class PawnChangeRelationGizmo
         if (Multiplayer.Client == null || Multiplayer.RealPlayerFaction == Multiplayer.WorldComp.spectatorFaction)
             yield break;
 
-        if (__instance.Faction is { IsPlayer: true } &&__instance.Faction != Faction.OfPlayer)
+        if (__instance.Faction is { IsPlayer: true } && __instance.Faction != Faction.OfPlayer)
         {
             var otherFaction = __instance.Faction;
 
@@ -616,16 +618,21 @@ static class IsActiveThreatToAnyPlayer
     }
 }
 
-[HarmonyPatch(typeof(JobDriver_TakeToBed), nameof(JobDriver_TakeToBed.CheckMakeTakeeGuest))]
-[HarmonyPatch(typeof(JobDriver_CarryDownedPawn), nameof(JobDriver_CarryDownedPawn.CheckMakeTakeeGuest))]
+[HarmonyPatch]
 static class TakeToBedGuestFactionPatch
 {
+    static IEnumerable<MethodBase> TargetMethods()
+    {
+        yield return AccessTools.DeclaredMethod(typeof(JobDriver_TakeToBed), nameof(JobDriver_TakeToBed.CheckMakeTakeeGuest));
+        yield return AccessTools.DeclaredMethod(typeof(JobDriver_CarryDownedPawn), nameof(JobDriver_CarryDownedPawn.CheckMakeTakeeGuest));
+    }
     static bool Prefix(JobDriver __instance)
     {
         var takee = __instance.job.GetTarget(TargetIndex.A).Pawn;
         return takee?.Faction?.IsPlayer != true && takee?.HostFaction?.IsPlayer != true;
     }
 }
+
 
 [HarmonyPatch(typeof(LetterStack), nameof(LetterStack.ReceiveLetter), typeof(Letter), typeof(string), typeof(int), typeof(bool))]
 static class LetterStackReceiveOnlyMyFaction
@@ -753,7 +760,7 @@ static class CharacterCardUtilityDontDrawIdeoPlate
     }
 }
 
-[HarmonyPatch(typeof(CompShuttle), "ContainedColonistCount", MethodType.Getter)]
+[HarmonyPatch(typeof(CompShuttle), nameof(CompShuttle.ContainedColonistCount), MethodType.Getter)]
 static class CompShuttle_ContainedColonistCount_Patch
 {
     static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> insts)
@@ -782,7 +789,7 @@ static class CompShuttle_ContainedColonistCount_Patch
                pawn.RaceProps.Humanlike &&
                (!pawn.IsSlave || pawn.guest.SlaveIsSecure) &&
                !pawn.IsSubhuman &&
-               pawn.HostFaction == null; 
+               pawn.HostFaction == null;
     }
 
 }
@@ -823,14 +830,14 @@ static class PlaceGravship_FactionContext_Patch
         __state = true;
     }
 
-    static void Finalizer(Gravship gravship, Map map,bool __state)
+    static void Finalizer(Gravship gravship, Map map, bool __state)
     {
         if (!__state) return;
         map.PopFaction();
     }
 }
 
-[HarmonyPatch(typeof(QuestPart_LendColonistsToFaction), "Enable")]
+[HarmonyPatch(typeof(QuestPart_LendColonistsToFaction), nameof(QuestPart_LendColonistsToFaction.Enable))]
 static class QuestPart_LendColonistsToFaction_Enable_Patch
 {
     static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> insts)
@@ -845,6 +852,107 @@ static class QuestPart_LendColonistsToFaction_Enable_Patch
                 ci.opcode = OpCodes.Call;
                 ci.operand = replacement;
             }
+            yield return ci;
+        }
+    }
+}
+
+[HarmonyPatch(typeof(Map), nameof(Map.IsPlayerHome), MethodType.Getter)]
+static class Map_IsPlayerHome_Spectator_Patch
+{
+    static bool Prefix(Map __instance, bool __result)
+    {
+        if (Multiplayer.Client == null || !Multiplayer.GameComp.multifaction ||
+            Faction.OfPlayer != Multiplayer.WorldComp.spectatorFaction)
+            return true;
+
+        {
+            // Is repeat through all player faction a better idea?
+            if (!__instance.wasSpawnedViaGravShipLanding)
+            {
+                MapInfo mapInfo = __instance.info;
+                if (((mapInfo != null) ? mapInfo.parent : null) == null || __instance.info.parent.Faction.IsPlayer == false || !__instance.info.parent.def.canBePlayerHome)
+                {
+                    __result = GravshipUtility.PlayerHasGravEngine(__instance);
+                    return false;
+                }
+            }
+            __result = true;
+            return false;
+        }
+    }
+}
+
+[HarmonyPatch]
+static class Pawn_TraderTracker_ColonyThingsWillingToBuy_Patch
+{
+    static MethodInfo TargetMethod()
+    {
+        return AccessTools.EnumeratorMoveNext(AccessTools.Method(typeof(Pawn_TraderTracker), nameof(Pawn_TraderTracker.ColonyThingsWillingToBuy)));
+    }
+    public static List<Building> AllBuildingsColonistOfDefOfPlayer(this ListerBuildings lister, ThingDef def)
+    {
+        if (def.CanHaveFaction)
+            return lister.AllBuildingsColonistOfDef(def).FindAll(building => building.Faction == Faction.OfPlayer);
+        else
+            return lister.AllBuildingsColonistOfDef(def);
+    }
+    public static IEnumerable<T> AllColonistBuildingsOfTypeOfPlayer<T>(this ListerBuildings lister)
+    {
+        return lister.AllColonistBuildingsOfType<T>().Where(t =>
+        {
+            if (t is Building building && (!building.def.CanHaveFaction || building.Faction == Faction.OfPlayer))
+                return true;
+            return false;
+        });
+    }
+    static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> insts)
+    {
+        var allBuildingsColonistOfDef = AccessTools.Method(typeof(ListerBuildings), nameof(ListerBuildings.AllBuildingsColonistOfDef));
+        var allBuildingsColonistOfDefOfPlayer = AccessTools.Method(typeof(Pawn_TraderTracker_ColonyThingsWillingToBuy_Patch), nameof(Pawn_TraderTracker_ColonyThingsWillingToBuy_Patch.AllBuildingsColonistOfDefOfPlayer));
+        var allColonistBuildingsOfType = AccessTools.Method(typeof(ListerBuildings), nameof(ListerBuildings.AllColonistBuildingsOfType)).MakeGenericMethod([typeof(IHaulSource)]);
+        var allColonistBuildingsOfTypeOfPlayer = AccessTools.Method(typeof(Pawn_TraderTracker_ColonyThingsWillingToBuy_Patch), nameof(Pawn_TraderTracker_ColonyThingsWillingToBuy_Patch.AllColonistBuildingsOfTypeOfPlayer)).MakeGenericMethod([typeof(IHaulSource)]);
+        foreach (var ci in insts)
+        {
+            if (ci.Calls(allBuildingsColonistOfDef))
+            {
+                ci.opcode = OpCodes.Call;
+                ci.operand = allBuildingsColonistOfDefOfPlayer;
+            }
+            else if (ci.Calls(allColonistBuildingsOfType))
+            {
+                ci.opcode = OpCodes.Call;
+                ci.operand = allColonistBuildingsOfTypeOfPlayer;
+            }
+            yield return ci;
+        }
+    }
+}
+
+[HarmonyPatch]
+static class TradeUtility_AllLaunchableThingsForTrade_Patch
+{
+    static MethodInfo TargetMethod()
+    {
+        return AccessTools.EnumeratorMoveNext(AccessTools.Method(typeof(TradeUtility), nameof(TradeUtility.AllLaunchableThingsForTrade)));
+    }
+
+    public static IEnumerable<Building_OrbitalTradeBeacon> AllPoweredOfPlayer(Map map)
+    {
+        return Building_OrbitalTradeBeacon.AllPowered(map).Where(beacon => beacon.Faction == Faction.OfPlayer);
+    }
+    static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> insts)
+    {
+        var allPowered = AccessTools.Method(typeof(Building_OrbitalTradeBeacon), nameof(Building_OrbitalTradeBeacon.AllPowered));
+        var allPoweredOfPlayer = AccessTools.Method(typeof(TradeUtility_AllLaunchableThingsForTrade_Patch), nameof(TradeUtility_AllLaunchableThingsForTrade_Patch.AllPoweredOfPlayer));
+        foreach (var ci in insts)
+        {
+            if (ci.Calls(allPowered))
+            {
+                ci.opcode = OpCodes.Call;
+                ci.operand = allPoweredOfPlayer;
+            }
+
             yield return ci;
         }
     }

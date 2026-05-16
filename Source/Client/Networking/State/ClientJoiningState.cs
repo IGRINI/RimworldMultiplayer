@@ -30,6 +30,10 @@ namespace Multiplayer.Client
         [TypedPacketHandler]
         public void HandleProtocolOk(ServerProtocolOkPacket packet)
         {
+            Multiplayer.session.isStandaloneServer = packet.isStandaloneServer;
+            Multiplayer.session.autosaveInterval = packet.autosaveInterval;
+            Multiplayer.session.autosaveUnit = packet.autosaveUnit;
+
             if (packet.hasPassword)
             {
                 // Delay showing the window for better UX
@@ -46,16 +50,21 @@ namespace Multiplayer.Client
 
         [TypedPacketHandler]
         public void HandleInitDataRequest(ServerInitDataRequestPacket packet) =>
-            connection.SendFragmented(PackInitData(packet.includeConfigs).ToNet().Serialize());
+            connection.SendFragmented(CreateInitDataPacket(packet.includeConfigs).Serialize());
 
-        public static ServerInitData PackInitData(bool includeConfigs) => new(
-            JoinData.WriteServerData(includeConfigs),
-            VersionControl.CurrentVersionString,
-            Sync.handlers.Where(h => h.debugOnly).Select(h => h.syncId).ToHashSet(),
-            Sync.handlers.Where(h => h.hostOnly).Select(h => h.syncId).ToHashSet(),
-            (MultiplayerData.modCtorRoundMode, MultiplayerData.staticCtorRoundMode),
-            new Dictionary<string, DefInfo>(MultiplayerData.localDefInfos)
-        );
+        public static ClientInitDataPacket CreateInitDataPacket(bool includeConfigs) => new()
+        {
+            rwVersion = VersionControl.CurrentVersionString,
+            debugOnlySyncCmds = Sync.handlers.Where(h => h.debugOnly).Select(h => h.syncId).ToHashSet().ToArray(),
+            hostOnlySyncCmds = Sync.handlers.Where(h => h.hostOnly).Select(h => h.syncId).ToHashSet().ToArray(),
+            modCtorRoundMode = MultiplayerData.modCtorRoundMode,
+            staticCtorRoundMode = MultiplayerData.staticCtorRoundMode,
+            defInfos = MultiplayerData.localDefInfos
+                .Select(kv => new KeyedDefInfo { name = kv.Key, count = kv.Value.count, hash = kv.Value.hash })
+                .ToArray(),
+            includeConfigs = includeConfigs,
+            Mods = JoinData.WriteServerData(includeConfigs)
+        };
 
         [PacketHandler(Packets.Server_UsernameOk)]
         public void HandleUsernameOk(ByteReader data) =>
@@ -74,13 +83,6 @@ namespace Multiplayer.Client
             Multiplayer.session.gameName = packet.gameName;
             Multiplayer.session.playerId = packet.playerId;
 
-            var remoteInfo = new RemoteData
-            {
-                remoteRwVersion = packet.rwVersion,
-                remoteMpVersion = packet.mpVersion,
-                connector = Multiplayer.session.connector
-            };
-
             var defDiff = false;
             var defStatusMap = new Dictionary<DefInfo, DefCheckStatus>();
             var i = 0;
@@ -93,7 +95,7 @@ namespace Multiplayer.Client
                     defDiff = true;
             }
 
-            JoinData.ReadServerData(packet.rawServerInitData, remoteInfo);
+            var remoteInfo = RemoteData.FromNet(packet);
 
             // Delay showing the window for better UX
             OnMainThread.Schedule(Complete, 0.3f);
@@ -115,7 +117,8 @@ namespace Multiplayer.Client
                     .Take(10)
                     .Join(kv => $"{kv.name}: {kv.status}", "\n");
 
-                Find.WindowStack.Add(new JoinDataWindow(remoteInfo){
+                Find.WindowStack.Add(new JoinDataWindow(remoteInfo, Multiplayer.session.connector)
+                {
                     connectAnywayDisabled = defDiff ? "MpMismatchDefsDiff".Translate() + defDiffStr : null,
                     connectAnywayCallback = StartDownloading
                 });

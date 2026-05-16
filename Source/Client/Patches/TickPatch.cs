@@ -292,6 +292,7 @@ namespace Multiplayer.Client
                     }
 
                     ScheduledCommand cmd = tickable.Cmds.Dequeue();
+
                     // Minimal code impact fix for #733. Having all the commands be added to a single queue gets rid of
                     // the out-of-order execution problem. With a proper fix, this can be reverted to tickable.ExecuteCmd
                     var target = TickableById(cmd.mapId);

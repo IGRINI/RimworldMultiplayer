@@ -24,6 +24,7 @@ public partial class BootstrapConfiguratorWindow
     private bool saveReady;
     private bool isUploadingSave;
     private bool saveUploadAutoStarted;
+    private bool closeBootstrapModeOnDisconnect;
     private string savedReplayPath;
     private string saveUploadStatus;
     private float saveUploadProgress;
@@ -175,7 +176,7 @@ public partial class BootstrapConfiguratorWindow
         postMapEnterSaveDelayRemaining = PostMapEnterSaveDelaySeconds;
         awaitingControllablePawns = true;
         bootstrapSaveQueued = false;
-        saveUploadStatus = "Map initialized. Waiting before saving...";
+        saveUploadStatus = "Map initialized. Waiting for controllable colonists to spawn...";
 
         if (Find.WindowStack.WindowOfType<BootstrapConfiguratorWindow>() == null)
             Find.WindowStack.Add(this);
@@ -283,7 +284,16 @@ public partial class BootstrapConfiguratorWindow
     {
         try
         {
-            Autosaving.SaveGameToFile_Overwrite(BootstrapSaveName, currentReplay: false);
+            if (!Autosaving.SaveGameToFile_Overwrite(BootstrapSaveName, currentReplay: false))
+            {
+                OnMainThread.Enqueue(() =>
+                {
+                    saveUploadStatus = "Save failed, see log for details.";
+                    bootstrapSaveQueued = false;
+                });
+                return;
+            }
+
             var path = Path.Combine(Multiplayer.ReplaysDir, $"{BootstrapSaveName}.zip");
             OnMainThread.Enqueue(() => FinalizeBootstrapSave(path));
         }
@@ -325,19 +335,27 @@ public partial class BootstrapConfiguratorWindow
     private void ReturnToMenuAndReconnect()
     {
         GenScene.GoToMainMenu();
-        OnMainThread.Enqueue(() =>
+        LongEventHandler.ExecuteWhenFinished(ReconnectAfterReturningToMenu);
+    }
+
+    private void ReconnectAfterReturningToMenu()
+    {
+        if (Current.ProgramState != ProgramState.Entry || Current.Game != null)
         {
-            saveUploadStatus = "Reconnecting to upload save...";
-            Multiplayer.StopMultiplayer();
+            saveUploadStatus = "Waiting to finish returning to menu...";
+            LongEventHandler.ExecuteWhenFinished(ReconnectAfterReturningToMenu);
+            return;
+        }
 
-            if (reconnectConnector == null)
-            {
-                saveUploadStatus = "No connector available to reconnect to the bootstrap server.";
-                return;
-            }
+        saveUploadStatus = "Reconnecting to upload save...";
 
-            ClientUtil.TryConnectWithWindow(reconnectConnector, false);
-        });
+        if (reconnectConnector == null)
+        {
+            saveUploadStatus = "No connector available to reconnect to the bootstrap server.";
+            return;
+        }
+
+        ClientUtil.TryConnectWithWindow(reconnectConnector, false);
     }
 
     private void StartUploadSaveZip()
@@ -371,6 +389,7 @@ public partial class BootstrapConfiguratorWindow
         {
             try
             {
+                closeBootstrapModeOnDisconnect = true;
                 connection.SendFragmented(new ClientBootstrapSaveDataPacket(saveData, hash).Serialize());
 
                 OnMainThread.Enqueue(() =>
@@ -383,6 +402,7 @@ public partial class BootstrapConfiguratorWindow
             {
                 OnMainThread.Enqueue(() =>
                 {
+                    closeBootstrapModeOnDisconnect = false;
                     isUploadingSave = false;
                     saveUploadStatus = $"Failed to upload save.zip: {exception.GetType().Name}: {exception.Message}";
                 });
