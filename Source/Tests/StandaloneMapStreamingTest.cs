@@ -143,38 +143,4 @@ public class StandaloneMapStreamingTest
         Assert.That(player.currentMapId, Is.EqualTo(5));
         Assert.That(conn.SentPackets, Does.Not.Contain(Packets.Server_MapResponse));
     }
-
-    [Test]
-    public void HandleDebug_IgnoredWhenDevModeDisabled()
-    {
-        server.gameTimer = 123;
-        server.startingTimer = 5;
-        server.worldData.mapCmds[1] = [[1]];
-        var (player, conn) = AddPlayer("player", 1);
-
-        var state = player.conn.GetState<ServerPlayingState>()!;
-        state.HandleDebug(new ClientDebugPacket());
-
-        Assert.That(server.gameTimer, Is.EqualTo(123));
-        Assert.That(server.worldData.mapCmds[1], Has.Count.EqualTo(1));
-        Assert.That(conn.SentPackets, Does.Not.Contain(Packets.Server_Debug));
-    }
-
-    [Test]
-    public void HandleDebug_AllowsPlayersWhenDevModeEnabled()
-    {
-        server.settings.debugMode = true;
-        server.settings.devModeScope = DevModeScope.Everyone;
-        server.gameTimer = 123;
-        server.startingTimer = 5;
-        server.worldData.mapCmds[1] = [[1]];
-        var (player, conn) = AddPlayer("player", 1);
-
-        var state = player.conn.GetState<ServerPlayingState>()!;
-        state.HandleDebug(new ClientDebugPacket());
-
-        Assert.That(server.gameTimer, Is.EqualTo(5));
-        Assert.That(server.worldData.mapCmds, Is.Empty);
-        Assert.That(conn.SentPackets, Does.Contain(Packets.Server_Debug));
-    }
 }

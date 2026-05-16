@@ -199,7 +199,7 @@ namespace Multiplayer.Common
         protected virtual void HandleReceiveMsg(int msgId, int fragState, ByteReader reader, bool reliable)
         {
             if (msgId is < 0 or >= (int)Packets.Count)
-                throw new PacketBadIdException(msgId);
+                throw new PacketReadException($"Bad packet id {msgId}");
 
             Packets packetType = (Packets)msgId;
             if (reader.Left > MaxSinglePacketSize)

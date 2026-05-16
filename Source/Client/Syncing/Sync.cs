@@ -256,16 +256,10 @@ namespace Multiplayer.Client
 
         public static SyncMethod RegisterSyncMethod(MethodInfo method, SyncType[] argTypes = null)
         {
-            if (methodBaseToInternalId.TryGetValue(method, out var id))
-            {
-                Log.Error($"Error in {method.DeclaringType?.FullName}::{method}: Method is already registered as a SyncMethod.");
-                return (SyncMethod)internalIdToSyncMethod[id];
-            }
-
             MpUtil.MarkNoInlining(method);
 
-            var handler = new SyncMethod(method.IsStatic ? null : method.DeclaringType, null, method, argTypes);
-            methodBaseToInternalId[method] = internalIdToSyncMethod.Count;
+            SyncMethod handler = new SyncMethod(method.IsStatic ? null : method.DeclaringType, null, method, argTypes);
+            methodBaseToInternalId[handler.method] = internalIdToSyncMethod.Count;
             internalIdToSyncMethod.Add(handler);
             handlers.Add(handler);
 

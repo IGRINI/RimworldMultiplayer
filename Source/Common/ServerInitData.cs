@@ -6,7 +6,6 @@ namespace Multiplayer.Common;
 
 public record ServerInitData(
     byte[] RawData,
-    bool IncludeConfigs,
     string RwVersion,
     HashSet<int> DebugOnlySyncCmds,
     HashSet<int> HostOnlySyncCmds,
@@ -14,8 +13,20 @@ public record ServerInitData(
     Dictionary<string, DefInfo> DefInfos
 )
 {
+    public ClientInitDataPacket ToNet() => new()
+    {
+        rwVersion = RwVersion,
+        debugOnlySyncCmds = DebugOnlySyncCmds.ToArray(),
+        hostOnlySyncCmds = HostOnlySyncCmds.ToArray(),
+        modCtorRoundMode = RoundModes.Item1,
+        staticCtorRoundMode = RoundModes.Item2,
+        defInfos = DefInfos.Select(kv => new KeyedDefInfo
+            { name = kv.Key, count = kv.Value.count, hash = kv.Value.hash }).ToArray(),
+        rawData = RawData
+    };
+
     public static ServerInitData FromNet(ClientInitDataPacket packet) => new(
-        packet.rawMods, packet.includeConfigs, packet.rwVersion,
+        packet.rawData, packet.rwVersion,
         packet.debugOnlySyncCmds.ToHashSet(),
         packet.hostOnlySyncCmds.ToHashSet(),
         (packet.modCtorRoundMode, packet.staticCtorRoundMode),

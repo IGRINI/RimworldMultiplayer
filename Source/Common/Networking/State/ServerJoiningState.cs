@@ -1,6 +1,5 @@
 ﻿using System;
 using System.IO;
-using System.Linq;
 using System.Threading.Tasks;
 using Multiplayer.Common.Networking.Packet;
 
@@ -29,11 +28,8 @@ public class ServerJoiningState : AsyncConnectionState
         if (Server.settings.pauseOnJoin)
             Server.commands.PauseAll();
 
-        // On standalone, only request a fresh join point when another player is already active.
-        // For the normal first join, serve the persisted state immediately instead of blocking on WaitJoinPoint.
-        if ((Server.IsStandaloneServer && Server.PlayingPlayers.Any()) ||
-            (!Server.IsStandaloneServer && Server.settings.autoJoinPoint.HasFlag(AutoJoinPointFlags.Join)))
-            Server.worldData.TryStartJoinPointCreation(sourcePlayer: Player);
+        if (Server.settings.autoJoinPoint.HasFlag(AutoJoinPointFlags.Join))
+            Server.worldData.TryStartJoinPointCreation();
 
         Server.playerManager.OnJoin(Player);
         Server.playerManager.SendInitDataCommand(Player);
@@ -49,11 +45,7 @@ public class ServerJoiningState : AsyncConnectionState
             Player.Disconnect(MpDisconnectReason.Protocol, ByteWriter.GetBytes(MpVersion.Version, MpVersion.Protocol));
         else
         {
-            Player.SendPacket(new ServerProtocolOkPacket(Server.settings.hasPassword, Server.IsStandaloneServer)
-            {
-                autosaveInterval = Server.settings.autosaveInterval,
-                autosaveUnit = Server.settings.autosaveUnit
-            });
+            Player.SendPacket(new ServerProtocolOkPacket(Server.settings.hasPassword));
 
             if (Server.BootstrapMode)
             {
@@ -159,8 +151,7 @@ public class ServerJoiningState : AsyncConnectionState
             rwVersion = serverInitData.RwVersion,
             mpVersion = MpVersion.Version,
             defStatus = defStatus,
-            configsIncluded = serverInitData.IncludeConfigs,
-            rawServerInitData = serverInitData.RawData,
+            rawServerInitData = serverInitData.RawData
         }.Serialize());
 
         if (Server.BootstrapMode)

@@ -228,11 +228,9 @@ namespace Multiplayer.Common
         [PacketHandler(Packets.Client_WorldDataUpload, allowFragmented: true)]
         public void HandleWorldDataUpload(ByteReader data)
         {
-            // On standalone, accept from any playing client; otherwise only host/arbiter
-            if (!Server.IsStandaloneServer && !RequireArbiterOrHost())
-                return;
+            if (!RequireArbiterOrHost()) return;
 
-            ServerLog.Detail($"Got world upload {data.Left}");
+            ServerLog.Log($"Got world upload {data.Left}");
 
             int maps = data.ReadInt32();
             if (maps < 0 || maps > MaxMapsCount)
@@ -267,54 +265,6 @@ namespace Multiplayer.Common
 
             if (Server.worldData.CreatingJoinPoint)
                 Server.worldData.EndJoinPointCreation();
-        }
-
-        [TypedPacketHandler]
-        public void HandleStandaloneWorldSnapshot(ClientStandaloneWorldSnapshotPacket packet)
-        {
-            if (!Server.IsStandaloneServer)
-                return;
-
-            if (!Player.IsPlaying)
-                return;
-
-            var accepted = Server.worldData.TryAcceptStandaloneWorldSnapshot(Player, packet.tick,
-                packet.worldData, packet.sessionData, packet.sha256Hash);
-
-            if (accepted)
-            {
-                ServerLog.Detail(
-                    $"Accepted standalone world snapshot tick={packet.tick} from {Player.Username}");
-            }
-            else
-            {
-                ServerLog.Detail(
-                    $"Rejected standalone world snapshot tick={packet.tick} from {Player.Username}");
-            }
-        }
-
-        [TypedPacketHandler]
-        public void HandleStandaloneMapSnapshot(ClientStandaloneMapSnapshotPacket packet)
-        {
-            if (!Server.IsStandaloneServer)
-                return;
-
-            if (!Player.IsPlaying)
-                return;
-
-            var accepted = Server.worldData.TryAcceptStandaloneMapSnapshot(Player, packet.mapId, packet.tick,
-                packet.mapData, packet.sha256Hash);
-
-            if (accepted)
-            {
-                ServerLog.Detail(
-                    $"Accepted standalone map snapshot map={packet.mapId} tick={packet.tick} from {Player.Username}");
-            }
-            else
-            {
-                ServerLog.Detail(
-                    $"Rejected standalone map snapshot map={packet.mapId} tick={packet.tick} from {Player.Username}");
-            }
         }
 
         [TypedPacketHandler]
@@ -393,20 +343,12 @@ namespace Multiplayer.Common
                 Player.unfrozenAt = Server.NetTimer;
         }
 
-        [TypedPacketHandler]
-        public void HandleAutosaving(ClientAutosavingPacket packet)
+        [PacketHandler(Packets.Client_Autosaving)]
+        public void HandleAutosaving(ByteReader data)
         {
-            var forceJoinPoint = packet.reason == JoinPointRequestReason.Save;
-
-            ServerLog.Detail(
-                $"Received Client_Autosaving from {Player.Username}, standalone={Server.IsStandaloneServer}, " +
-                $"isHost={Player.IsHost}, reason={packet.reason}, force={forceJoinPoint}");
-
-            // On standalone, any playing client can trigger a join point (always, regardless of settings)
-            // On hosted, only the host can trigger and only if the Autosave flag is set
-            if (Server.IsStandaloneServer ||
-                (Player.IsHost && Server.settings.autoJoinPoint.HasFlag(AutoJoinPointFlags.Autosave)))
-                Server.worldData.TryStartJoinPointCreation(forceJoinPoint, sourcePlayer: Player);
+            // Host policy
+            if (Player.IsHost && Server.settings.autoJoinPoint.HasFlag(AutoJoinPointFlags.Autosave))
+                Server.worldData.TryStartJoinPointCreation();
         }
 
         [TypedPacketHandler]

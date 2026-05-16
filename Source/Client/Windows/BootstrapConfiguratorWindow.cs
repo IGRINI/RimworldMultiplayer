@@ -106,35 +106,6 @@ public partial class BootstrapConfiguratorWindow : Window, IConnectionStatusList
             Instance = null;
     }
 
-    private void ExitBootstrapMode(bool clearPendingUploadState)
-    {
-        closeBootstrapModeOnDisconnect = false;
-        retainInstanceOnClose = false;
-
-        ResetTransientUiState(resetServerDrivenState: true);
-
-        isUploadingToml = false;
-        uploadProgress = 0f;
-        statusText = null;
-        settingsUploaded = false;
-        saveReady = false;
-        savedReplayPath = null;
-        saveUploadStatus = null;
-        saveUploadProgress = 0f;
-        bootstrapState = BootstrapServerState.None;
-
-        if (clearPendingUploadState)
-            pendingUploadState = null;
-
-        if (Current.Game?.components != null)
-            Current.Game.components.RemoveAll(component => component is Comp.BootstrapCoordinator);
-
-        if (Find.WindowStack?.Windows.Contains(this) == true)
-            Find.WindowStack.TryRemove(this);
-        else if (ReferenceEquals(Instance, this))
-            Instance = null;
-    }
-
     internal void ResetTransientUiState(bool resetServerDrivenState = false)
     {
         AwaitingBootstrapMapInit = false;
@@ -246,7 +217,10 @@ public partial class BootstrapConfiguratorWindow : Window, IConnectionStatusList
         if (tab == Tab.Connecting)
             return 5 * 30f;
 
-        return (MpVersion.IsDebug ? 9 : 8) * 30f;
+        if (tab == Tab.Gameplay)
+            return (MpVersion.IsDebug ? 9 : 8) * 30f;
+
+        return 260f;
     }
 
     private sealed class PendingUploadState
@@ -262,6 +236,7 @@ public partial class BootstrapConfiguratorWindow : Window, IConnectionStatusList
 
     public void Disconnected(SessionDisconnectInfo info)
     {
-        ExitBootstrapMode(clearPendingUploadState: closeBootstrapModeOnDisconnect);
+        ResetTransientUiState(resetServerDrivenState: true);
+        Find.WindowStack.TryRemove(this);
     }
 }

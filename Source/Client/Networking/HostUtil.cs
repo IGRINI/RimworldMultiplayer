@@ -71,8 +71,7 @@ namespace Multiplayer.Client
                 localServer.startingTimer = TickPatch.Timer;
             }
 
-            var initData = ClientJoiningState.CreateInitDataPacket(settings.syncConfigs);
-            localServer.StartInitData().SetResult(ServerInitData.FromNet(initData));
+            localServer.StartInitData().SetResult(ClientJoiningState.PackInitData(settings.syncConfigs));
         }
 
         private static void PrepareGame()

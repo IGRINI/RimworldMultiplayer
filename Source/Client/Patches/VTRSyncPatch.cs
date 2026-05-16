@@ -2,7 +2,6 @@ using System;
 using HarmonyLib;
 using Multiplayer.Client.Util;
 using Multiplayer.Common;
-using Multiplayer.Common.Networking.Packet;
 using RimWorld.Planet;
 using Verse;
 
@@ -16,8 +15,8 @@ namespace Multiplayer.Client.Patches
             if (Multiplayer.Client == null)
                 return true;
 
-            // Keep the synchronized update rate until animation timing can be
-            // brought back in line with the vanilla value.
+            // TODO: Put this back to the original value
+            // Probably need to sync up all the animations before doing this
             __result = VTRSync.GetSynchronizedUpdateRate(thing);
             return false;
         }
@@ -143,11 +142,6 @@ namespace Multiplayer.Client.Patches
                     {
                         VTRSync.SendViewedMapUpdate(VTRSync.lastMovedToMapId, VTRSync.WorldMapId);
                     }
-
-                    // On standalone with streaming, trigger a join point when leaving a map
-                    // so each player can save independently without disturbing others
-                    if (Multiplayer.session?.ConnectedToStandaloneServer == true && Multiplayer.GameComp.multifaction && Multiplayer.GameComp.asyncTime)
-                        Multiplayer.Client.Send(new ClientAutosavingPacket(JoinPointRequestReason.WorldTravel));
                 }
                 // Detect transition back to tile map
                 else if (__result != WorldRenderMode.Planet && lastRenderMode == WorldRenderMode.Planet)

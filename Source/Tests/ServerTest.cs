@@ -124,8 +124,7 @@ public class ServerTest
             gameName = "Test",
             direct = true,
             directAddress = "127.0.0.1:0", // 0 makes the OS choose any free port
-            lan = false,
-            autoJoinPoint = 0 // Disable: test server has no game simulation to complete join points
+            lan = false
         })
         {
             running = true
