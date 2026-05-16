@@ -75,7 +75,11 @@ namespace Multiplayer.Common
         public void HandleTraces(ClientTracesPacket packet)
         {
             if (!RequireHost()) return;
-            Server.GetPlayer(packet.playerId)?.SendPacket(ServerTracesPacket.Transfer(packet.rawTraces, packet.rawJittedMethods));
+            var target = Server.GetPlayer(packet.playerId);
+            ServerLog.Log(
+                $"Desync host traces received: target={target?.Username ?? packet.playerId.ToString()}, " +
+                $"traceBytes={packet.rawTraces?.Length ?? 0}, jittedBytes={packet.rawJittedMethods?.Length ?? 0}");
+            target?.conn.SendFragmented(ServerTracesPacket.Transfer(packet.rawTraces, packet.rawJittedMethods).Serialize());
         }
 
         // Section 8: send the cached host worldData snapshot back to the requesting (desynced)
@@ -83,18 +87,20 @@ namespace Multiplayer.Common
         // save in memory from the last Client_WorldDataUpload. Empty array if nothing cached
         // yet (early-session desync); the client side handles the empty case gracefully.
         //
-        // Gated on PlayerStatus.Desynced + a long per-player cooldown: the payload is the entire
-        // world save (potentially many MB) and a healthy client has no business asking for it.
-        // Without these gates a client could spam the request and force the server to fragment
-        // the save out repeatedly.
+        // Gated on PlayerStatus.Desynced: healthy clients have no business asking for it, but once
+        // the peer is already in the diagnostic path we keep this cooperative and do not throttle.
         [TypedPacketHandler]
         public void HandleRequestHostSave(ClientRequestHostSavePacket _)
         {
-            if (Player.status != PlayerStatus.Desynced) return;
-            if (!Player.RateLimitAllow("hostSave", MultiplayerServer.NetTicksPerSecond * 30)) return;
+            if (Player.status != PlayerStatus.Desynced)
+            {
+                ServerLog.Log($"Ignoring host save request from non-desynced player {Player.Username} ({Player.status})");
+                return;
+            }
 
             var saved = Server.worldData?.savedGame ?? System.Array.Empty<byte>();
-            Player.SendPacket(new ServerHostSaveTransferPacket(saved));
+            ServerLog.Log($"Sending host save snapshot to {Player.Username}: bytes={saved.Length}");
+            connection.SendFragmented(new ServerHostSaveTransferPacket(saved).Serialize());
         }
 
         [TypedPacketHandler]
@@ -107,15 +113,22 @@ namespace Multiplayer.Common
             if (Player.pendingBufferOverflowed) return;
 
             int? mapToResync = null;
+            byte[] commandData = packet.data;
 
             if (packet.type == CommandType.PlayerCount)
             {
                 ByteReader reader = new ByteReader(packet.data);
                 var prevMapId = reader.ReadInt32();
                 var newMapId = reader.ReadInt32();
-                if (Player.currentMapId != prevMapId)
+
+                if (Player.hasReportedCurrentMap && Player.currentMapId != prevMapId)
+                {
                     ServerLog.Error($"Inconsistent player {Player.Username} map. Last known map: {Player.currentMapId}, " +
                                     $"however received command with transition: {prevMapId} -> {newMapId}");
+                    prevMapId = Player.currentMapId;
+                    commandData = ByteWriter.GetBytes(prevMapId, newMapId);
+                }
+
                 Player.currentMapId = newMapId;
                 Player.hasReportedCurrentMap = true;
 
@@ -135,7 +148,7 @@ namespace Multiplayer.Common
 
             // todo check if map id is valid for the player
 
-            Server.commands.Send(packet.type, Player.FactionId, packet.mapId, packet.data, Player);
+            Server.commands.Send(packet.type, Player.FactionId, packet.mapId, commandData, Player);
 
             if (mapToResync is int currentMapId)
                 Server.SendMapResponse(Player, currentMapId);
@@ -277,25 +290,15 @@ namespace Multiplayer.Common
             Server.SendToIngame(serverPacket, reliable: false, excluding: Player);
         }
 
-        // Rate-limit budgets are expressed in NetTicks (NetTicksPerSecond=30). Selected/ping/freeze
-        // are best-effort UI updates — silently dropping over-budget packets is the correct policy:
-        // disconnecting would punish UI lag, queueing would amplify it. Cursor already has its own
-        // dedup via lastCursorTick and stays out of the generic limiter.
-        private const int SelectedMinIntervalNetTicks = 3; // ~10 Hz
-        private const int PingMinIntervalNetTicks = 6;     // ~5 Hz
-        private const int FreezeMinIntervalNetTicks = 15;  // ~2 Hz
-
         [TypedPacketHandler]
         public void HandleSelected(ClientSelectedPacket packet)
         {
-            if (!Player.RateLimitAllow("selected", SelectedMinIntervalNetTicks)) return;
             Server.SendToPlaying(new ServerSelectedPacket(Player.id, packet), excluding: Player);
         }
 
         [TypedPacketHandler]
         public void HandlePing(ClientPingLocPacket packet)
         {
-            if (!Player.RateLimitAllow("ping", PingMinIntervalNetTicks)) return;
             Server.SendToPlaying(new ServerPingLocPacket(Player.id, packet));
         }
 
@@ -335,8 +338,6 @@ namespace Multiplayer.Common
         [TypedPacketHandler]
         public void HandleFreeze(ClientFreezePacket packet)
         {
-            if (!Player.RateLimitAllow("freeze", FreezeMinIntervalNetTicks)) return;
-
             Player.frozen = packet.freeze;
 
             if (!packet.freeze)

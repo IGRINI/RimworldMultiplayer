@@ -144,6 +144,29 @@ public class ServerPlayingStateTest
         SentPacketsOf(bob).Should().Contain(Packets.Server_Traces);
     }
 
+    [Test]
+    public void Traces_HostForwardsLargeTracePayloadAsFragments()
+    {
+        ClearSentPackets();
+        var bobConn = (RecordingConnection)bob.conn;
+
+        host.conn.GetState<ServerPlayingState>()!
+            .HandleTraces(new ClientTracesPacket
+            {
+                playerId = bob.id,
+                rawTraces = MakePayload(ConnectionBase.MaxSinglePacketSize + 1, 17),
+                rawJittedMethods = MakePayload(4096, 31),
+            });
+
+        var traceMessages = bobConn.SentMessages
+            .Where(m => m.id == Packets.Server_Traces)
+            .ToList();
+        traceMessages.Should().HaveCountGreaterThan(1,
+            "host desync traces can exceed the single-packet limit and must use fragmentation");
+        traceMessages.Should().OnlyContain(m => m.body.Length <= ConnectionBase.MaxFragmentPacketSize,
+            "every emitted trace fragment must stay below the transport-safe packet size");
+    }
+
     private static void InvokeTraces(ServerPlayer sender, int targetPlayerId) =>
         sender.conn.GetState<ServerPlayingState>()!
             .HandleTraces(new ClientTracesPacket
@@ -152,6 +175,14 @@ public class ServerPlayingStateTest
                 rawTraces = Array.Empty<byte>(),
                 rawJittedMethods = Array.Empty<byte>(),
             });
+
+    private static byte[] MakePayload(int length, int seed)
+    {
+        var payload = new byte[length];
+        for (int i = 0; i < payload.Length; i++)
+            payload[i] = (byte)((i + seed) % byte.MaxValue);
+        return payload;
+    }
 
     // ---------- HandleWorldDataUpload ----------
 
@@ -336,13 +367,9 @@ public class ServerPlayingStateTest
         alice.frameTime.Should().Be(ok);
     }
 
-    // ---------- Per-class rate limits ----------
-
     [Test]
-    public void RateLimit_PingDropsBurstWithinInterval()
+    public void Ping_AllowsBurst()
     {
-        // Two pings back-to-back at the same NetTimer must collapse to a single broadcast — the
-        // second one returns early before SendToPlaying.
         ClearSentPackets();
         var state = alice.conn.GetState<ServerPlayingState>()!;
 
@@ -350,14 +377,13 @@ public class ServerPlayingStateTest
         state.HandlePing(new ClientPingLocPacket());
 
         var pings = SentPacketsAcrossAllPlayers().Count(p => p == Packets.Server_PingLocation);
-        pings.Should().Be(server.playerManager.Players.Count(),
-            "first ping fans out to all playing players; second is rate-limited");
+        pings.Should().Be(server.playerManager.Players.Count() * 2,
+            "coop responsiveness is preferred over dropping rapid UI packets");
     }
 
     [Test]
-    public void RateLimit_FreezeDropsRapidToggle()
+    public void Freeze_AllowsRapidToggle()
     {
-        // Freeze flips state — the first call commits, the rapid follow-up must NOT toggle back.
         var state = alice.conn.GetState<ServerPlayingState>()!;
         alice.frozen = false;
 
@@ -365,11 +391,11 @@ public class ServerPlayingStateTest
         alice.frozen.Should().BeTrue();
 
         state.HandleFreeze(new ClientFreezePacket(false));
-        alice.frozen.Should().BeTrue("rapid follow-up is rate-limited; the unfreeze must not land");
+        alice.frozen.Should().BeFalse("rapid follow-up should land in trusted co-op mode");
     }
 
     [Test]
-    public void RateLimit_SelectedDropsBurstWithinInterval()
+    public void Selected_AllowsBurst()
     {
         ClearSentPackets();
         var state = alice.conn.GetState<ServerPlayingState>()!;
@@ -383,8 +409,8 @@ public class ServerPlayingStateTest
         state.HandleSelected(packet);
 
         var fanouts = SentPacketsAcrossAllPlayers().Count(p => p == Packets.Server_Selected);
-        fanouts.Should().Be(server.playerManager.Players.Count() - 1,
-            "first selected fans out to playing players (excluding sender); second is rate-limited");
+        fanouts.Should().Be((server.playerManager.Players.Count() - 1) * 2,
+            "selection updates are part of live co-op feedback and should not be rate-limited");
     }
 
     [Test]
@@ -404,10 +430,8 @@ public class ServerPlayingStateTest
     }
 
     [Test]
-    public void HostSave_RateLimitedAcrossRepeatedRequests()
+    public void HostSave_AllowsRepeatedRequestsForDesyncedPlayer()
     {
-        // Even after a desync, repeated requests must be cooldown'd. Without this a desynced
-        // client can spam the request and force the server to fragment-send the save every time.
         var aliceConn = (RecordingConnection)alice.conn;
         aliceConn.SentPackets.Clear();
         var state = alice.conn.GetState<ServerPlayingState>()!;
@@ -417,8 +441,51 @@ public class ServerPlayingStateTest
         state.HandleRequestHostSave(new ClientRequestHostSavePacket());
         state.HandleRequestHostSave(new ClientRequestHostSavePacket());
 
-        aliceConn.SentPackets.Count(p => p == Packets.Server_HostSaveTransfer).Should().Be(1,
-            "first request fires; subsequent ones are rate-limited within the cooldown window");
+        aliceConn.SentPackets.Count(p => p == Packets.Server_HostSaveTransfer).Should().Be(3,
+            "desync diagnostics run in trusted co-op mode and should not be rate-limited");
+    }
+
+    [Test]
+    public void HostSave_SendsLargeSaveAsFragments()
+    {
+        var aliceConn = (RecordingConnection)alice.conn;
+        aliceConn.SentPackets.Clear();
+        aliceConn.SentMessages.Clear();
+        server.worldData.savedGame = Enumerable.Range(0, ConnectionBase.MaxSinglePacketSize + 1)
+            .Select(i => (byte)(i % byte.MaxValue))
+            .ToArray();
+        alice.status = PlayerStatus.Desynced;
+
+        alice.conn.GetState<ServerPlayingState>()!
+            .HandleRequestHostSave(new ClientRequestHostSavePacket());
+
+        var hostSaveMessages = aliceConn.SentMessages
+            .Where(m => m.id == Packets.Server_HostSaveTransfer)
+            .ToList();
+        hostSaveMessages.Should().HaveCountGreaterThan(1,
+            "host save snapshots can be megabytes and must use the fragmented packet path");
+        hostSaveMessages.Should().OnlyContain(m => m.body.Length <= ConnectionBase.MaxFragmentPacketSize,
+            "every emitted fragment must stay below the transport-safe packet size");
+    }
+
+    [Test]
+    public void CommandSeq_UsesGlobalCounterInEmbeddedMode()
+    {
+        ClearSentPackets();
+        host.sentCmdsCount = 10;
+        alice.sentCmdsCount = 2;
+        bob.sentCmdsCount = 5;
+
+        server.commands.Send(CommandType.Sync, ScheduledCommand.NoFaction, ScheduledCommand.Global, [1, 2, 3, 4]);
+
+        LastCommandSentTo(host).seq.Should().Be(0);
+        LastCommandSentTo(alice).seq.Should().Be(0);
+        LastCommandSentTo(bob).seq.Should().Be(0);
+        host.sentCmdsCount.Should().Be(10);
+        alice.sentCmdsCount.Should().Be(2);
+        bob.sentCmdsCount.Should().Be(5);
+        server.commands.SentCmds.Should().Be(1,
+            "embedded-host sessions use the shared command history for live packets");
     }
 
     private static ByteReader BuildWorldUpload(int maps, byte[]? savedGame = null, byte[]? sessionData = null)
@@ -490,7 +557,10 @@ public class ServerPlayingStateTest
     private void ClearSentPackets()
     {
         foreach (var p in server.playerManager.Players)
+        {
             ((RecordingConnection)p.conn).SentPackets.Clear();
+            ((RecordingConnection)p.conn).SentMessages.Clear();
+        }
     }
 
     private static List<Packets> SentPacketsOf(ServerPlayer player) =>
@@ -498,4 +568,12 @@ public class ServerPlayingStateTest
 
     private IEnumerable<Packets> SentPacketsAcrossAllPlayers() =>
         server.playerManager.Players.SelectMany(p => ((RecordingConnection)p.conn).SentPackets);
+
+    private static ServerCommandPacket LastCommandSentTo(ServerPlayer player)
+    {
+        var body = ((RecordingConnection)player.conn).SentMessages.Last(m => m.id == Packets.Server_Command).body;
+        var packet = new ServerCommandPacket();
+        packet.Bind(new PacketReader(new ByteReader(body)));
+        return packet;
+    }
 }

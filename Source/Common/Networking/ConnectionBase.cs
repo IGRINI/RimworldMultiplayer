@@ -21,6 +21,8 @@ namespace Multiplayer.Common
 
         public void ChangeState(MpConnectionState state)
         {
+            ClearReceiveFragments();
+
             if (StateObj != null)
                 StateObj.alive = false;
 
@@ -31,6 +33,8 @@ namespace Multiplayer.Common
 
         public void ChangeState(ConnectionStateEnum state)
         {
+            ClearReceiveFragments();
+
             if (StateObj != null)
                 StateObj.alive = false;
 
@@ -42,6 +46,8 @@ namespace Multiplayer.Common
         public void Send(Packets id) => Send(id, []);
 
         public void Send(SerializedPacket packet, bool reliable = true) => Send(packet.id, packet.data, reliable);
+
+        public virtual bool TryEnqueueLocalHostDesyncTraces(int tick, int diffAt, int targetPlayerId) => false;
 
         public void Send<T>(T packet, bool reliable = true) where T : struct, IPacket
         {
@@ -63,9 +69,8 @@ namespace Multiplayer.Common
 
             // Rent a header+payload buffer from the pool and use the length-aware SendRaw overload.
             // Implementations that copy the bytes (LiteNet, Steam, NoOp recorders) override the
-            // length-aware overload and use only [0..length). LocalConnection (in-memory loopback)
-            // retains a reference to the array via ByteReader, so it stays on the byte[]-sized
-            // overload, which the base implementation services with a tight new byte[length].
+            // length-aware overload and use only [0..length). Deferred/in-memory implementations
+            // retain the array reference, so the base overload below must hand them an owned copy.
             byte[] full = ArrayPool<byte>.Shared.Rent(totalLen);
             try
             {
@@ -158,21 +163,13 @@ namespace Multiplayer.Common
 
         // Length-aware overload. Implementations whose underlying transport copies the bytes
         // (LiteNet, Steam, Recording/Dummy test stubs) override this to avoid allocating a tightly
-        // sized byte[] when callers pass a pooled buffer. The default forwards to SendRaw(byte[],
-        // bool) for implementations that need to retain the array (e.g. LocalConnection wrapping
-        // it in a ByteReader for deferred handling).
+        // sized byte[] when callers pass a pooled buffer. The default always copies because it is
+        // used by deferred implementations that retain the array after Send returns.
         protected virtual void SendRaw(byte[] raw, int length, bool reliable)
         {
-            if (raw.Length == length)
-            {
-                SendRaw(raw, reliable);
-            }
-            else
-            {
-                byte[] exact = new byte[length];
-                Buffer.BlockCopy(raw, 0, exact, 0, length);
-                SendRaw(exact, reliable);
-            }
+            byte[] exact = new byte[length];
+            Buffer.BlockCopy(raw, 0, exact, 0, length);
+            SendRaw(exact, reliable);
         }
 
         public virtual void HandleReceiveRaw(ByteReader data, bool reliable)
@@ -193,8 +190,14 @@ namespace Multiplayer.Common
                 ServerLog.Error($"Packet was not fully consumed: {msgId}, msg len: {msgLen}");
         }
 
-        private const int MaxFragmentedPackets = 1;
+        private const int MaxFragmentedPackets = 4;
+        private const long MaxFragmentedPacketsTotalExpectedSize = (long)MaxFragmentPacketTotalSize * 2;
         private readonly List<(/* fragId */ byte, FragmentedPacket)> fragments = [];
+
+        private void ClearReceiveFragments()
+        {
+            fragments.Clear();
+        }
 
         protected virtual void HandleReceiveMsg(int msgId, int fragState, ByteReader reader, bool reliable)
         {
@@ -210,7 +213,8 @@ namespace Multiplayer.Common
             {
                 if (reliable && !Lenient)
                     throw new PacketReadException($"No handler for packet {packetType} in state {State}");
-                ServerLog.Error($"No handler for packet {packetType} in state {State}");
+                if (!Lenient)
+                    ServerLog.Error($"No handler for packet {packetType} in state {State}");
                 reader.Seek(reader.Length);
                 return;
             }
@@ -230,16 +234,19 @@ namespace Multiplayer.Common
             FragmentedPacket fragPacket;
             if (fragIndex == -1)
             {
-                if (fragments.Count >= MaxFragmentedPackets)
-                    throw new PacketReadException(
-                        $"High number of fragmented packets at once! {fragments.Count}/{MaxFragmentedPackets}. This will likely cause issues. Dropping the just received fragmented packet (packet type: {packetType}, fragment id: {fragId}).");
-
                 var expectedParts = reader.ReadUShort();
                 var expectedSize = reader.ReadUInt32();
                 if (expectedParts < 2)
                     ServerLog.Error($"Received fragmented packet with only {expectedParts} expected parts (packet type: {packetType}, fragment id: {fragId}, expected size: {expectedSize}).");
                 if (expectedSize > MaxFragmentPacketTotalSize)
                     throw new PacketReadException($"Full packet {packetType} too big {expectedSize}>{MaxFragmentPacketTotalSize}");
+                if (fragments.Count >= MaxFragmentedPackets)
+                    throw new PacketReadException(
+                        $"Too many fragmented packets at once! {fragments.Count}/{MaxFragmentedPackets}. Dropping packet type {packetType}, fragment id {fragId}.");
+                long pendingExpectedSize = PendingFragmentedPacketsExpectedSize();
+                if (pendingExpectedSize + expectedSize > MaxFragmentedPacketsTotalExpectedSize)
+                    throw new PacketReadException(
+                        $"Too much fragmented packet data in flight for {packetType} (fragId {fragId}): {pendingExpectedSize + expectedSize}>{MaxFragmentedPacketsTotalExpectedSize}");
 
                 fragPacket = FragmentedPacket.Create(packetType, expectedParts, expectedSize);
                 fragIndex = fragments.Count;
@@ -268,6 +275,15 @@ namespace Multiplayer.Common
 
             fragments.RemoveAt(fragIndex);
             ExecuteMessageHandler(handler, packetType, new ByteReader(fragPacket.Data.GetBuffer()));
+        }
+
+        private long PendingFragmentedPacketsExpectedSize()
+        {
+            long totalSize = 0;
+            foreach ((_, FragmentedPacket packet) in fragments)
+                totalSize += packet.ExpectedSize;
+
+            return totalSize;
         }
 
         private void ExecuteMessageHandler(PacketHandlerInfo handler, Packets packet, ByteReader data)

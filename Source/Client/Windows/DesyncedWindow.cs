@@ -12,14 +12,23 @@ namespace Multiplayer.Client
     {
         const int NumButtons = 5;
         const float ButtonsWidth = 120 * NumButtons + 10 * (NumButtons - 1);
+        const float HostTraceMaxWait = 20f;
+        const float HostSaveMaxWait = 20f;
 
         public override Vector2 InitialSize => new(30 + 130 * NumButtons, 110);
 
         private string text;
         [CanBeNull] private readonly SaveableDesyncInfo desyncInfo;
         private float openedAt;
+        private float hostTracesReceivedAt;
         private bool infoWritten;
         private bool rejoining;
+        private bool hostSaveRequested;
+        private bool hostSaveReceived;
+        private bool hostSaveSkipped;
+        private bool hostTraceTimeoutLogged;
+        private bool hostSaveTimeoutLogged;
+        private bool rejoinScheduled;
         [CanBeNull] private SaveableDesyncInfo.HostInfo hostInfo;
 
         // Section 8 paired save: stash whatever the server replied with for Client_RequestHostSave
@@ -44,15 +53,8 @@ namespace Multiplayer.Client
             doCloseX = true;
 #endif
 
-            // Section 8: kick off the host-save fetch as soon as the window is constructed so the
-            // bytes are likely available by the time WindowUpdate decides to flush the report.
-            // Only meaningful when there's an actual desyncInfo to write into; protocol desyncs
-            // skip the report path entirely, so don't waste a packet round-trip.
-            if (desyncInfo != null && Multiplayer.Client != null)
-            {
-                try { Multiplayer.Client.Send(new ClientRequestHostSavePacket()); }
-                catch { /* connection torn down — report still writes with no host save. */ }
-            }
+            if (desyncInfo != null)
+                MpLog.Log("Desync diagnostics window opened; waiting for host traces before requesting host save");
         }
 
         public override void DoWindowContents(Rect inRect)
@@ -74,8 +76,10 @@ namespace Multiplayer.Client
             if (Widgets.ButtonText(new Rect(x, 0, 120, 35), "MpTryResync".Translate()) && !rejoining)
             {
                 rejoining = true;
-                Log.Message("Multiplayer: requesting rejoin");
-                Rejoiner.DoRejoin();
+                if (desyncInfo == null || infoWritten)
+                    ScheduleRejoin();
+                else
+                    MpLog.Log("Multiplayer: rejoin requested; waiting for desync diagnostics to be written");
             }
 
             x += 120 + 10;
@@ -116,6 +120,14 @@ namespace Multiplayer.Client
             // — the host save flows from a different packet pair (Client_RequestHostSave →
             // Server_HostSaveTransfer) than the traces (ServerTracesPacket Request/Transfer).
             this.hostInfo = hostInfo with { HostSavedGame = hostSavedGame ?? hostInfo.HostSavedGame };
+            hostTracesReceivedAt = Time.realtimeSinceStartup;
+            if (Multiplayer.settings.autoRejoinOnDesync)
+            {
+                hostSaveSkipped = true;
+                MpLog.Log("Desync host traces arrived; skipping host save snapshot because auto-rejoin is enabled");
+            }
+            else
+                RequestHostSave();
         }
 
         // Called by ClientPlayingState.HandleHostSaveTransfer. Folds the host save bytes into the
@@ -124,19 +136,34 @@ namespace Multiplayer.Client
         public void HandleHostSavedGame(byte[] savedGame)
         {
             hostSavedGame = savedGame;
+            hostSaveReceived = true;
             if (hostInfo != null)
                 hostInfo = hostInfo with { HostSavedGame = savedGame };
+            MpLog.Log($"Desync host save received: bytes={savedGame?.Length ?? 0}");
         }
 
         public override void WindowUpdate()
         {
-            const float maxWait = 5f;
-
             // Protocol-level desyncs (e.g. command-stream gap) trigger this window without a
             // SaveableDesyncInfo — there's nothing to compare or write. Skip the report path.
             if (desyncInfo == null) return;
 
-            var shouldWrite = hostInfo != null || Time.realtimeSinceStartup - openedAt > maxWait;
+            var now = Time.realtimeSinceStartup;
+            var hostTraceTimedOut = hostInfo == null && now - openedAt > HostTraceMaxWait;
+            if (hostTraceTimedOut && !hostTraceTimeoutLogged)
+            {
+                hostTraceTimeoutLogged = true;
+                MpLog.Warn($"Desync host traces did not arrive within {HostTraceMaxWait}s; writing report without them");
+            }
+
+            var hostSaveTimedOut = hostInfo != null && !hostSaveSkipped && !hostSaveReceived && now - hostTracesReceivedAt > HostSaveMaxWait;
+            if (hostSaveTimedOut && !hostSaveTimeoutLogged)
+            {
+                hostSaveTimeoutLogged = true;
+                MpLog.Warn($"Desync host save did not arrive within {HostSaveMaxWait}s after host traces; writing traces without host save");
+            }
+
+            var shouldWrite = hostTraceTimedOut || (hostInfo != null && (hostSaveSkipped || hostSaveReceived || hostSaveTimedOut));
             if (!infoWritten && shouldWrite && desyncInfo.ReadyToSave)
             {
                 // Even if hostInfo is still null after maxWait, fold in any host save we did
@@ -146,7 +173,43 @@ namespace Multiplayer.Client
                     infoForSave = new SaveableDesyncInfo.HostInfo(null, null, hostSavedGame);
                 desyncInfo.Save(infoForSave);
                 infoWritten = true;
+
+                if (rejoining || Multiplayer.settings.autoRejoinOnDesync)
+                    ScheduleRejoin();
             }
+        }
+
+        private void RequestHostSave()
+        {
+            if (hostSaveRequested || Multiplayer.Client == null)
+                return;
+
+            hostSaveRequested = true;
+            try
+            {
+                MpLog.Log("Desync host traces arrived; requesting host save snapshot");
+                Multiplayer.Client.Send(new ClientRequestHostSavePacket());
+            }
+            catch (System.Exception e)
+            {
+                MpLog.Warn($"Failed to request host save for desync report: {e.GetType().Name}: {e.Message}");
+            }
+        }
+
+        private void ScheduleRejoin()
+        {
+            if (rejoinScheduled)
+                return;
+
+            rejoinScheduled = true;
+            OnMainThread.Schedule(static () =>
+            {
+                if (Multiplayer.Client != null && Multiplayer.session != null && Multiplayer.session.desynced)
+                {
+                    Log.Message("Multiplayer: requesting rejoin");
+                    Rejoiner.DoRejoin();
+                }
+            }, 0.1f);
         }
     }
 

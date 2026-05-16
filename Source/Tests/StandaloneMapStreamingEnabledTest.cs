@@ -187,6 +187,28 @@ public class StandaloneMapStreamingEnabledTest
         conn.SentPackets.Should().NotContain(Packets.Server_MapResponse);
     }
 
+    [Test]
+    public void Streaming_PlayerCountWithStalePrevious_UsesServerKnownPreviousOnWire()
+    {
+        var (player, conn) = AddPlayer("p", 12, loadedMaps: 12);
+        int errorCount = 0;
+        ServerLog.error = _ => { errorCount++; };
+
+        var state = player.conn.GetState<ServerPlayingState>()!;
+        state.HandleClientCommand(new ClientCommandPacket(
+            CommandType.PlayerCount, ScheduledCommand.Global, ByteWriter.GetBytes(-1, 20)));
+
+        player.currentMapId.Should().Be(20);
+        errorCount.Should().Be(1, "the server should still report the stale transition for diagnostics");
+
+        var command = LastCommandSentTo(conn);
+        command.type.Should().Be(CommandType.PlayerCount);
+
+        var reader = new ByteReader(command.data);
+        reader.ReadInt32().Should().Be(12, "the broadcast must decrement the server-known previous map");
+        reader.ReadInt32().Should().Be(20);
+    }
+
     // ---------------- CommandHandler.Send routing ----------------
 
     [Test]
@@ -925,5 +947,13 @@ public class StandaloneMapStreamingEnabledTest
         int snapshotCommandSeq = reader.ReadInt32();
         snapshotCommandSeq.Should().Be(sentCmdsAtMapResponse,
             "snapshotCommandSeq on the wire must equal player.sentCmdsCount at MapResponse send time");
+    }
+
+    private static ServerCommandPacket LastCommandSentTo(RecordingConnection conn)
+    {
+        var body = conn.SentMessages.Last(m => m.id == Packets.Server_Command).body;
+        var packet = new ServerCommandPacket();
+        packet.Bind(new PacketReader(new ByteReader(body)));
+        return packet;
     }
 }

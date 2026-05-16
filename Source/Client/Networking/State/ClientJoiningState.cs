@@ -35,7 +35,7 @@ namespace Multiplayer.Client
                 // Delay showing the window for better UX
                 OnMainThread.Schedule(() => Find.WindowStack.Add(new GamePasswordWindow(username)
                 {
-                    returnToServerBrowser = Find.WindowStack.WindowOfType<BaseConnectingWindow>().returnToServerBrowser
+                    returnToServerBrowser = Find.WindowStack.WindowOfType<BaseConnectingWindow>()?.returnToServerBrowser ?? false
                 }), 0.3f);
             }
             else
@@ -115,7 +115,8 @@ namespace Multiplayer.Client
                     .Take(10)
                     .Join(kv => $"{kv.name}: {kv.status}", "\n");
 
-                Find.WindowStack.Add(new JoinDataWindow(remoteInfo){
+                Find.WindowStack.Add(new JoinDataWindow(remoteInfo)
+                {
                     connectAnywayDisabled = defDiff ? "MpMismatchDefsDiff".Translate() + defDiffStr : null,
                     connectAnywayCallback = StartDownloading
                 });

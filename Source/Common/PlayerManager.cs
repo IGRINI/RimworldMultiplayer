@@ -109,7 +109,11 @@ namespace Multiplayer.Common
         public void OnDesync(ServerPlayer player, int tick, int diffAt)
         {
             player.UpdateStatus(PlayerStatus.Desynced);
-            server.HostPlayer.SendPacket(ServerTracesPacket.Request(tick, diffAt, player.id));
+            var host = server.HostPlayer;
+            ServerLog.Log($"Desync diagnostics requested: target={player.Username}({player.id}), tick={tick}, diffAt={diffAt}, host={host.Username}");
+
+            if (!host.conn.TryEnqueueLocalHostDesyncTraces(tick, diffAt, player.id))
+                host.SendPacket(ServerTracesPacket.Request(tick, diffAt, player.id));
 
             player.ResetTimeVotes();
 

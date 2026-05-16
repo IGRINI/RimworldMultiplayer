@@ -25,13 +25,6 @@ namespace Multiplayer.Common
 
         public int lastCursorTick = -1;
 
-        // Per-class packet rate limiter state. Key is a short string label chosen by the handler
-        // (e.g. "ping", "selected", "freeze"); value is the NetTimer at which that class was last
-        // allowed through. Lazily created on first use so players that never trip a limit pay nothing.
-        // See PerPlayerRateLimiter.Allow for the cooldown rule. Sized loosely — handlers in scope
-        // share a tiny key set, so the dictionary stays small per player.
-        private Dictionary<string, int>? rateLimitLastAllowedNetTick;
-
         // Cooldown for HandleFrameTime warning logs. Stores the NetTimer at which the last bad-value
         // log fired so a flood of NaN/Inf/out-of-range frame times from one client doesn't spam
         // ServerLog. Compared against MultiplayerServer.NetTicksPerSecond * 2 in the handler.
@@ -95,21 +88,6 @@ namespace Multiplayer.Common
         {
             this.id = id;
             conn = connection;
-        }
-
-        // Per-player, per-class packet rate limiter. Returns true and updates the last-allowed
-        // tick when the gap since the previous accepted call meets minIntervalNetTicks; otherwise
-        // returns false and leaves state untouched. Use for best-effort UI packets (ping, selected,
-        // freeze) where a silent drop is the right policy — caller just `return`s on false.
-        // Cheap by design: one dictionary lookup, no allocations on the hot path after first use.
-        public bool RateLimitAllow(string key, int minIntervalNetTicks)
-        {
-            int now = Server.NetTimer;
-            rateLimitLastAllowedNetTick ??= new Dictionary<string, int>();
-            if (rateLimitLastAllowedNetTick.TryGetValue(key, out int last) && now - last < minIntervalNetTicks)
-                return false;
-            rateLimitLastAllowedNetTick[key] = now;
-            return true;
         }
 
         public void HandleReceive(ByteReader data, bool reliable)

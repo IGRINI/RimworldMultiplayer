@@ -87,4 +87,54 @@ public class DesyncRecoveryTest
         ((byte)Packets.Client_RequestHostSave).Should().BeLessThan((byte)Packets.Server_HostSaveTransfer);
         ((byte)Packets.Server_HostSaveTransfer).Should().BeLessThan((byte)Packets.Count);
     }
+
+    [Test]
+    public void ClientTracesPacket_AllowsTraceBlobsLargerThanDefaultPacketLimit()
+    {
+        var sent = new ClientTracesPacket
+        {
+            playerId = 7,
+            rawTraces = MakePayload(40_000, 11),
+            rawJittedMethods = MakePayload(45_000, 29)
+        };
+
+        var writer = new ByteWriter();
+        sent.Bind(new PacketWriter(writer));
+
+        var reader = new ByteReader(writer.ToArray());
+        var read = new ClientTracesPacket();
+        read.Bind(new PacketReader(reader));
+
+        read.playerId.Should().Be(sent.playerId);
+        read.rawTraces.Should().Equal(sent.rawTraces);
+        read.rawJittedMethods.Should().Equal(sent.rawJittedMethods);
+    }
+
+    [Test]
+    public void ServerTracesPacket_Transfer_AllowsTraceBlobsLargerThanDefaultPacketLimit()
+    {
+        var sent = ServerTracesPacket.Transfer(
+            MakePayload(40_000, 13),
+            MakePayload(45_000, 31));
+
+        var writer = new ByteWriter();
+        sent.Bind(new PacketWriter(writer));
+
+        var reader = new ByteReader(writer.ToArray());
+        var read = new ServerTracesPacket();
+        read.Bind(new PacketReader(reader));
+
+        read.mode.Should().Be(ServerTracesPacket.Mode.Transfer);
+        read.rawTraces.Should().Equal(sent.rawTraces);
+        read.rawJittedMethods.Should().Equal(sent.rawJittedMethods);
+    }
+
+    private static byte[] MakePayload(int length, int seed)
+    {
+        var payload = new byte[length];
+        for (int i = 0; i < payload.Length; i++)
+            payload[i] = (byte)((i + seed) % byte.MaxValue);
+
+        return payload;
+    }
 }

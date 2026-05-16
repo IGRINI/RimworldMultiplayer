@@ -65,29 +65,36 @@ namespace Multiplayer.Client
         public static AccessTools.FieldRef<WorldGrid, List<WorldDrawLayerBase>> globalLayers = AccessTools.FieldRefAccess<WorldGrid, List<WorldDrawLayerBase>>(nameof(WorldGrid.globalLayers));
         public static WorldGrid copyFrom;
 
-        static bool Prefix(WorldGrid __instance, ref int ___cachedTraversalDistance, ref int ___cachedTraversalDistanceForStart, ref int ___cachedTraversalDistanceForEnd)
+        static void Postfix(WorldGrid __instance, ref int ___cachedTraversalDistance, ref int ___cachedTraversalDistanceForStart, ref int ___cachedTraversalDistanceForEnd)
         {
-            if (copyFrom == null) return true;
+            if (copyFrom == null) return;
 
-            WorldGrid grid = __instance;
+            try
+            {
+                WorldGrid grid = __instance;
+                WorldGrid source = copyFrom;
 
-            grid.surfaceViewAngle = copyFrom.SurfaceViewAngle;
-            grid.surfaceViewCenter = copyFrom.SurfaceViewCenter;
-            grid.surface.verts = copyFrom.UnsafeVerts;
-            grid.surface.tileIDToNeighbors_offsets = copyFrom.UnsafeTileIDToNeighbors_offsets;
-            grid.surface.tileIDToNeighbors_values = copyFrom.UnsafeTileIDToNeighbors_values;
-            grid.surface.tileIDToVerts_offsets = copyFrom.UnsafeTileIDToVerts_offsets;
-            grid.surface.averageTileSize = copyFrom.AverageTileSize;
-            grid.surface.tiles.Clear();
-            globalLayers(grid) = copyFrom.globalLayers;
+                if (grid.surface == null || source.surface == null)
+                    return;
 
-            ___cachedTraversalDistance = -1;
-            ___cachedTraversalDistanceForStart = -1;
-            ___cachedTraversalDistanceForEnd = -1;
+                grid.surfaceViewAngle = source.SurfaceViewAngle;
+                grid.surfaceViewCenter = source.SurfaceViewCenter;
+                grid.surface.verts = source.UnsafeVerts;
+                grid.surface.tileIDToNeighbors_offsets = source.UnsafeTileIDToNeighbors_offsets;
+                grid.surface.tileIDToNeighbors_values = source.UnsafeTileIDToNeighbors_values;
+                grid.surface.tileIDToVerts_offsets = source.UnsafeTileIDToVerts_offsets;
+                grid.surface.averageTileSize = source.AverageTileSize;
+                grid.surface.tiles.Clear();
+                globalLayers(grid) = source.globalLayers;
 
-            copyFrom = null;
-
-            return false;
+                ___cachedTraversalDistance = -1;
+                ___cachedTraversalDistanceForStart = -1;
+                ___cachedTraversalDistanceForEnd = -1;
+            }
+            finally
+            {
+                copyFrom = null;
+            }
         }
     }
 
@@ -100,46 +107,26 @@ namespace Multiplayer.Client
         {
             if (copyFrom == null) return true;
 
-            WorldGrid grid = __instance;
-
-            List<SurfaceTile> copyTiles = copyFrom.Tiles.ToList<SurfaceTile>();
-            List<SurfaceTile> gridTiles = grid.Tiles.ToList<SurfaceTile>();
-
-            for(int i = 0; i < copyTiles.Count; i++)
+            try
             {
-                SurfaceTile sourceTile = copyTiles[i];
-                SurfaceTile targetTile = gridTiles[i];
+                WorldGrid grid = __instance;
+                WorldGrid source = copyFrom;
 
-                // Tile
-                targetTile.biome = sourceTile.biome;
-                targetTile.elevation = sourceTile.elevation;
-                targetTile.hilliness = sourceTile.hilliness;
-                targetTile.temperature = sourceTile.temperature;
-                targetTile.rainfall = sourceTile.rainfall;
-                targetTile.swampiness = sourceTile.swampiness;
-                targetTile.feature = sourceTile.feature;
-                targetTile.pollution = sourceTile.pollution;
-                targetTile.tile = sourceTile.tile;
-                targetTile.mutatorsNullable = sourceTile.mutatorsNullable;
+                if (grid.surface == null || source.surface == null)
+                    return true;
 
-                // Surface Tile - Roads/Rivers are getters for potentialRoads/potentialRivers
-                targetTile.potentialRoads = sourceTile.potentialRoads;
-                targetTile.riverDist = sourceTile.riverDist;
-                targetTile.potentialRivers = sourceTile.potentialRivers;
+                // Use Clear/AddRange instead of reflection to preserve collection observers
+                // and handle readonly field correctly.
+                grid.surface.tiles.Clear();
+                grid.surface.tiles.AddRange(source.surface.tiles);
+
+                return false;
             }
-
-            // This is plain old data apart from the WorldFeature feature field which is a reference
-            // It later gets reset in WorldFeatures.ExposeData though so it can be safely copied
-            
-            // Use Clear/AddRange instead of reflection to preserve collection observers
-            // and handle readonly field correctly
-            grid.surface.tiles.Clear();
-            grid.surface.tiles.AddRange(copyFrom.surface.tiles);
-
-            // ExposeData runs multiple times but WorldGrid only needs LoadSaveMode.LoadingVars
-            copyFrom = null;
-
-            return false;
+            finally
+            {
+                // ExposeData runs multiple times but WorldGrid only needs LoadSaveMode.LoadingVars
+                copyFrom = null;
+            }
         }
     }
 

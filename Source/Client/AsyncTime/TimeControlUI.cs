@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
@@ -327,7 +328,12 @@ public static class ColonistBarTimeControl
             ITickable entryTickable = entry.map?.AsyncTime();
             if (entryTickable == null) entryTickable = Multiplayer.AsyncWorldTime;
 
-            Rect groupBar = bar.drawer.GroupFrameRect(entry.group);
+            if (!TryGetGroupFrameRect(bar, entry.group, out Rect groupBar))
+            {
+                curGroup = entry.group;
+                continue;
+            }
+
             float drawXPos = groupBar.x;
             Color bgColor = (entryTickable.ActualRateMultiplier(TimeSpeed.Normal) == 0f) ? pauseBgColor : normalBgColor;
             Vector2 flashPos = new Vector2(drawXPos + btnWidth / 2, groupBar.yMax + btnHeight / 2);
@@ -377,6 +383,20 @@ public static class ColonistBarTimeControl
                 DrawWindowShortcuts(new Rect(drawXPos, groupBar.yMax, 70, btnHeight), bgColor, options);
 
             curGroup = entry.group;
+        }
+    }
+
+    private static bool TryGetGroupFrameRect(ColonistBar bar, int group, out Rect groupBar)
+    {
+        try
+        {
+            groupBar = bar.drawer.GroupFrameRect(group);
+            return true;
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            groupBar = default;
+            return false;
         }
     }
 

@@ -69,11 +69,17 @@ namespace Multiplayer.Common
             // by ticks==curTimer and stalls on out-of-order entries. While loading the client is
             // paused (replayTimeSpeed=Paused), so buffering doesn't degrade responsiveness.
             //
-            // Each on-wire packet now carries a per-recipient monotonic seq. The client validates
+            // Each on-wire packet carries a per-recipient monotonic seq. The client validates
             // packet.seq == receivedCmds and treats any mismatch as a fatal sync failure. That means
             // sentCmdsCount must increment exactly once per emitted (or buffered) packet — both
             // immediate-send and buffer-add paths bump it here, and the drain in HandleMapLoaded
             // does NOT increment again (the bytes were finalized at buffer time).
+            //
+            // In embedded-host mode there is no lazy map streaming: every playing client receives
+            // the same live command stream, and joining clients seed receivedCmds from the global
+            // history snapshot in ServerLoadingState. Keep the legacy global seq there. Per-player
+            // seqs are only needed for standalone streaming, where some map-scoped commands are
+            // intentionally filtered or buffered per recipient.
             if (server.IsStandaloneServer)
             {
                 foreach (var player in server.PlayingPlayers)
@@ -121,9 +127,6 @@ namespace Multiplayer.Common
             }
             else
             {
-                // Embedded host (legacy): single broadcast. All PlayingPlayers see exactly the same
-                // cmd stream, so the global SentCmds counter is the same as each client's expected
-                // receivedCmds — assign seq from it before the increment below.
                 server.SendToPlaying(ServerCommandPacket.From(cmd, SentCmds));
             }
 

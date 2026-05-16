@@ -25,7 +25,6 @@ namespace Multiplayer.Client
             var worldGridSaved = Find.WorldGrid;
             var worldRendererSaved = Find.World.renderer;
             var tweenedPos = new Dictionary<int, Vector3>();
-            var drawers = new Dictionary<int, MapDrawer>();
             var localFactionId = Multiplayer.RealPlayerFaction.loadID;
             var mapCmds = new Dictionary<int, Queue<ScheduledCommand>>();
             var planetRenderMode = Find.World.renderer.wantedMode;
@@ -36,8 +35,6 @@ namespace Multiplayer.Client
 
             foreach (Map map in Find.Maps)
             {
-                drawers[map.uniqueID] = map.mapDrawer;
-
                 foreach (Pawn p in map.mapPawns.AllPawnsSpawned)
                     tweenedPos[p.thingIDNumber] = p.drawer.tweener.tweenedPos;
 
@@ -57,10 +54,9 @@ namespace Multiplayer.Client
                 gameData = SaveGameData();
             }
 
-            // TODO
-            //MapDrawerRegenPatch.copyFrom = drawers;
-            //WorldGridCachePatch.copyFrom = worldGridSaved;
-            //WorldGridExposeDataPatch.copyFrom = worldGridSaved;
+            WorldGridCachePatch.copyFrom = worldGridSaved;
+            WorldGridExposeDataPatch.copyFrom = worldGridSaved;
+            WorldRendererCachePatch.copyFrom = worldGridSaved;
 
             MusicManagerPlay musicManager = null;
             if (Find.MusicManagerPlay.gameObjectCreated)

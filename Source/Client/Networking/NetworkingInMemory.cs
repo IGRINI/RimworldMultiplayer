@@ -1,4 +1,8 @@
 using System;
+using System.Linq;
+using Ionic.Zlib;
+using Multiplayer.Client.Desyncs;
+using Multiplayer.Client.Util;
 using Multiplayer.Common;
 using Multiplayer.Common.Networking.Packet;
 using Verse;
@@ -30,6 +34,41 @@ namespace Multiplayer.Client.Networking
             localClient.remoteConn = localServer;
             localServer.remoteConn = localClient;
             return (localClient, localServer);
+        }
+
+        public override bool TryEnqueueLocalHostDesyncTraces(int tick, int diffAt, int targetPlayerId)
+        {
+            if (isClient)
+                return false;
+
+            OnMainThread.Enqueue(() => SendLocalHostDesyncTraces(tick, diffAt, targetPlayerId));
+            return true;
+        }
+
+        private static void SendLocalHostDesyncTraces(int tick, int diffAt, int targetPlayerId)
+        {
+            try
+            {
+                var sync = Multiplayer.game?.sync;
+                var info = sync?.knownClientOpinions.FirstOrDefault(op => op.startTick == tick);
+                var traces = info?.GetFormattedStackTracesForRange(diffAt) ?? "Traces not available";
+                var jittedMethods = JittedMethods.GetJittedMethodsString();
+                var packet = new ClientTracesPacket
+                {
+                    playerId = targetPlayerId,
+                    rawTraces = GZipStream.CompressString(traces),
+                    rawJittedMethods = GZipStream.CompressString(jittedMethods)
+                };
+
+                MpLog.Log(
+                    $"Desync host traces prepared locally: target={targetPlayerId}, tick={tick}, diffAt={diffAt}, " +
+                    $"traceBytes={packet.rawTraces.Length}, jittedBytes={packet.rawJittedMethods.Length}");
+                Multiplayer.Client?.SendFragmented(packet.Serialize());
+            }
+            catch (Exception e)
+            {
+                Log.Error($"Exception preparing local host desync traces: {e}");
+            }
         }
 
         protected override void SendRaw(byte[] raw, bool reliable = true)

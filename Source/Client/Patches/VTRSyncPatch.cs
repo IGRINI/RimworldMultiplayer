@@ -62,25 +62,57 @@ namespace Multiplayer.Client.Patches
 
         public static int GetSynchronizedUpdateRate(Thing thing) => thing?.MapHeld?.AsyncTime()?.VTR ?? MaximumVtr;
 
+        public static void ForceReportCurrentView()
+        {
+            if (Multiplayer.Client == null || Multiplayer.reloading || Multiplayer.IsReplay)
+                return;
+
+            int current = GetCurrentViewMapId();
+            if (current == InvalidMapId)
+                return;
+
+            int currentTick = Find.TickManager?.TicksGame ?? 0;
+            MpLog.Debug($"VTR initial map report: {InvalidMapId}->{current} @ tick {currentTick}");
+            Multiplayer.Client.SendCommand(CommandType.PlayerCount, ScheduledCommand.Global, ByteWriter.GetBytes(InvalidMapId, current));
+            lastMovedToMapId = current;
+            lastSentAtTick = currentTick;
+        }
+
         public static void SendViewedMapUpdate(int previous, int current)
         {
             if (Multiplayer.reloading)
                 return;
 
+            int transitionPrevious = previous;
             string warn = string.Empty;
             if (previous != lastMovedToMapId)
+            {
                 warn = $" mismatch between expected previous map {previous} and last moved to map {lastMovedToMapId}";
-            else if (previous == current) return;
+                if (lastMovedToMapId != InvalidMapId)
+                    transitionPrevious = lastMovedToMapId;
+            }
+
+            if (transitionPrevious == current) return;
+
             int currentTick = Find.TickManager?.TicksGame ?? 0;
-            MpLog.Debug($"VTR MapSwitchPatch: {lastMovedToMapId}->{current} @ tick {currentTick}{warn}");
-            Multiplayer.Client.SendCommand(CommandType.PlayerCount, ScheduledCommand.Global, ByteWriter.GetBytes(previous, current));
+            MpLog.Debug($"VTR MapSwitchPatch: {transitionPrevious}->{current} @ tick {currentTick}{warn}");
+            Multiplayer.Client.SendCommand(CommandType.PlayerCount, ScheduledCommand.Global, ByteWriter.GetBytes(transitionPrevious, current));
             lastMovedToMapId = current;
+        }
+
+        private static int GetCurrentViewMapId()
+        {
+            if (WorldRendererUtility.WorldSelected)
+                return WorldMapId;
+
+            return Find.CurrentMap?.uniqueID ?? InvalidMapId;
         }
 
         public static void Reset()
         {
             lastMovedToMapId = InvalidMapId;
             lastSentAtTick = -1;
+            WorldRenderModePatch.Reset();
         }
     }
 
@@ -128,6 +160,11 @@ namespace Multiplayer.Client.Patches
     static class WorldRenderModePatch
     {
         private static WorldRenderMode lastRenderMode = WorldRenderMode.None;
+
+        public static void Reset()
+        {
+            lastRenderMode = WorldRenderMode.None;
+        }
 
         static void Postfix(WorldRenderMode __result)
         {

@@ -4,6 +4,7 @@ using System.Linq;
 using Ionic.Zlib;
 using Multiplayer.Client.Saving;
 using Multiplayer.Common;
+using Multiplayer.Common.Networking.Packet;
 using Verse;
 
 namespace Multiplayer.Client;
@@ -42,11 +43,20 @@ public class ClientLoadingState(ConnectionBase connection) : ClientBaseState(con
     private List<(long, uint)> downloadCheckpoints = new(capacity: 64);
     private Stopwatch downloadTimeStopwatch = new();
 
+    // During rejoin, diagnostic packets from the previous desync window may still be in flight.
+    // Leave those packets unhandled while connection.Lenient is true so their fragments are
+    // discarded before the fragmented-packet reassembler tries to read stale payload as a header.
+    [TypedPacketHandler]
+    public void HandleFreeze(ServerFreezePacket packet)
+    {
+        TickPatch.serverFrozen = packet.frozen;
+        TickPatch.frozenAt = packet.gameTimer;
+    }
+
     [PacketHandler(Packets.Server_WorldDataStart)]
     public void HandleWorldDataStart(ByteReader data)
     {
         subState = LoadingState.Downloading;
-        connection.Lenient = false; // Lenient is set while rejoining
         downloadTimeStopwatch.Start();
     }
 
@@ -145,5 +155,6 @@ public class ClientLoadingState(ConnectionBase connection) : ClientBaseState(con
         var loadingMs = watch.ElapsedMilliseconds;
         Log.Message($"Loaded game in {loadingMs}ms");
         connection.ChangeState(ConnectionStateEnum.ClientPlaying);
+        connection.Lenient = false;
     }
 }

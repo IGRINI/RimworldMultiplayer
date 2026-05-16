@@ -11,6 +11,7 @@ using Multiplayer.Client.Util;
 using RimWorld.QuestGen;
 using UnityEngine;
 using Verse;
+using Verse.AI;
 using Random = UnityEngine.Random;
 
 namespace Multiplayer.Client.Patches
@@ -294,6 +295,26 @@ namespace Multiplayer.Client.Patches
     [HarmonyPatch(typeof(Pawn_RecordsTracker), nameof(Pawn_RecordsTracker.ExposeData))]
     static class RecordsTrackerExposePatch
     {
+        private static readonly AccessTools.FieldRef<Pawn_RecordsTracker, Battle> BattleActiveField =
+            AccessTools.FieldRefAccess<Pawn_RecordsTracker, Battle>("battleActive");
+
+        static void Prefix(Pawn_RecordsTracker __instance, out Battle __state)
+        {
+            __state = null;
+
+            if (Multiplayer.Client == null || Scribe.mode != LoadSaveMode.Saving)
+                return;
+
+            __state = BattleActiveField(__instance);
+            BattleActiveField(__instance) = __instance.BattleActive;
+        }
+
+        static void Postfix(Pawn_RecordsTracker __instance, Battle __state)
+        {
+            if (Multiplayer.Client != null && Scribe.mode == LoadSaveMode.Saving)
+                BattleActiveField(__instance) = __state;
+        }
+
         static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> insts)
         {
             var battleActiveField =
@@ -390,6 +411,26 @@ namespace Multiplayer.Client.Patches
                 else
                     yield return inst;
             }
+        }
+    }
+
+    [HarmonyPatch(typeof(MentalBreaker), "TestMoodMentalBreak")]
+    static class SkipNoOpNonPlayerMoodBreakRand
+    {
+        static bool Prefix(MentalBreaker __instance, ref bool __result)
+        {
+            if (Multiplayer.Client == null || (!Multiplayer.Ticking && !Multiplayer.ExecutingCmds))
+                return true;
+
+            Pawn pawn = __instance.pawn;
+            if (pawn?.Faction == null || pawn.Faction == Faction.OfPlayer)
+                return true;
+
+            if (__instance.CurrentDesiredMoodBreakIntensity == MentalBreakIntensity.Extreme)
+                return true;
+
+            __result = false;
+            return false;
         }
     }
 
@@ -750,5 +791,52 @@ namespace Multiplayer.Client.Patches
             Multiplayer.Client != null ? length : UnityData.GetIdealBatchCount(length);
     }
 
+    [HarmonyPatch(typeof(CompDeepDrill), "TryProducePortion")]
+    static class CompDeepDrillProducePortionDeterminismPatch
+    {
+        static void Prefix(CompDeepDrill __instance, out bool __state)
+        {
+            __state = Multiplayer.Client != null && __instance.parent is { Spawned: true };
+            if (!__state)
+                return;
+
+            var seed = Gen.HashCombineInt(__instance.parent.thingIDNumber, __instance.parent.Map.uniqueID);
+            seed = Gen.HashCombineInt(seed, Find.TickManager.TicksGame);
+            Rand.PushState(seed);
+        }
+
+        static Exception Finalizer(bool __state, Exception __exception)
+        {
+            if (__state)
+                Rand.PopState();
+
+            return __exception;
+        }
+    }
+
+    [HarmonyPatch(typeof(Verb_ShootBeam), nameof(Verb_ShootBeam.BurstingTick))]
+    static class VerbShootBeamBurstingTickDeterminismPatch
+    {
+        static void Prefix(Verb_ShootBeam __instance, out bool __state)
+        {
+            var caster = __instance.caster;
+            __state = Multiplayer.Client != null && caster is { Spawned: true };
+            if (!__state)
+                return;
+
+            var seed = Gen.HashCombineInt(caster.thingIDNumber, caster.Map.uniqueID);
+            seed = Gen.HashCombineInt(seed, Find.TickManager.TicksGame);
+            seed = Gen.HashCombineInt(seed, GenText.StableStringHash(__instance.loadID ?? string.Empty));
+            Rand.PushState(seed);
+        }
+
+        static Exception Finalizer(bool __state, Exception __exception)
+        {
+            if (__state)
+                Rand.PopState();
+
+            return __exception;
+        }
+    }
 
 }

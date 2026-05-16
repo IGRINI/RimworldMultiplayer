@@ -215,16 +215,30 @@ namespace Multiplayer.Client
 
             var TransferableOneWaySerializer = Serializer.New(
                 (TransferableOneWay t, object target, object[] args) =>
-                    (((ITab_ContentsTransporter)target).Transporter, t.AnyThing.thingIDNumber),
+                {
+                    var tab = target as ITab_ContentsTransporter;
+                    return (Transporter: tab?.Transporter, thingIDNumber: t?.AnyThing?.thingIDNumber ?? -1);
+                },
                 data =>
-                    data.Transporter.leftToLoad.Find(t => t.things.Any(thing => thing.thingIDNumber == data.thingIDNumber))
+                {
+                    if (data.Transporter?.leftToLoad == null)
+                        return null;
+
+                    return data.Transporter.leftToLoad.Find(t =>
+                        t?.things != null &&
+                        t.things.Any(thing => thing?.thingIDNumber == data.thingIDNumber));
+                }
             );
 
-            SyncMethod.Register(typeof(ITab_ContentsTransporter), nameof(ITab_ContentsTransporter.OnDropThing)).SetContext(SyncContext.MapSelected); // overriden ITab_ContentsBase.OnDropThing
+            SyncMethod.Register(typeof(ITab_ContentsTransporter), nameof(ITab_ContentsTransporter.OnDropThing))
+                .SetContext(SyncContext.MapSelected)
+                .CancelIfAnyArgNull()
+                .CancelIfNoSelectedMapObjects(); // overriden ITab_ContentsBase.OnDropThing
             SyncMethod.Register(typeof(ITab_ContentsTransporter), nameof(ITab_ContentsTransporter.OnDropToLoadThing))
                 .TransformArgument(0, TransferableOneWaySerializer)
                 .SetContext(SyncContext.MapSelected)
-                .CancelIfAnyArgNull();
+                .CancelIfAnyArgNull()
+                .CancelIfNoSelectedMapObjects();
 
             SyncMethod.Register(typeof(Precept_Ritual), nameof(Precept_Ritual.ShowRitualBeginWindow));
 

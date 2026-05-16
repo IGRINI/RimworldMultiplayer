@@ -3,6 +3,11 @@ namespace Multiplayer.Common.Networking.Packet;
 [PacketDefinition(Packets.Client_Traces, allowFragmented: true)]
 public record struct ClientTracesPacket : IPacket
 {
+    // Compressed trace/jitted-method blobs regularly exceed PacketBuffer's default 32 KiB
+    // payload limit on large mod lists. The outer packet is already fragmented and bounded by
+    // ConnectionBase.MaxFragmentPacketTotalSize, so keep a generous per-blob cap here.
+    public const int MaxTraceBlobLength = 16 * 1024 * 1024;
+
     public int playerId;
     public byte[] rawTraces;
     public byte[] rawJittedMethods;
@@ -10,8 +15,8 @@ public record struct ClientTracesPacket : IPacket
     public void Bind(PacketBuffer buf)
     {
         buf.Bind(ref playerId);
-        buf.BindBytes(ref rawTraces);
-        buf.BindBytes(ref rawJittedMethods);
+        buf.BindBytes(ref rawTraces, MaxTraceBlobLength);
+        buf.BindBytes(ref rawJittedMethods, MaxTraceBlobLength);
     }
 }
 
@@ -55,8 +60,8 @@ public record struct ServerTracesPacket : IPacket
         }
         else
         {
-            buf.BindBytes(ref rawTraces);
-            buf.BindBytes(ref rawJittedMethods);
+            buf.BindBytes(ref rawTraces, ClientTracesPacket.MaxTraceBlobLength);
+            buf.BindBytes(ref rawJittedMethods, ClientTracesPacket.MaxTraceBlobLength);
         }
     }
 }

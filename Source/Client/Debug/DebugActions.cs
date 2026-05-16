@@ -249,6 +249,12 @@ namespace Multiplayer.Client
             Log.Message($"Current opinion stack trace: \n{stackTrace}");
         }
 
+        [DebugAction(MultiplayerLocalCategory, name = "Find thing by id", allowedGameStates = AllowedGameStates.PlayingOnMap)]
+        public static void FindThingById()
+        {
+            Find.WindowStack.Add(new FindThingByIdWindow());
+        }
+
         [DebugAction(MultiplayerCategory, name = "Show pending player", allowedGameStates = AllowedGameStates.Playing)]
         public static void ShowPendingPlayer()
         {

@@ -203,8 +203,9 @@ namespace Multiplayer.Common
             // per-player count — using the global sentCmdsSnapshot would freeze the simulation
             // window for any player whose map-scoped cmds were filtered/buffered.
             //
-            // For the embedded host (non-streaming) every player gets every cmd, so the global
-            // counter is correct and we keep the single broadcast send.
+            // Embedded-host sessions do not stream maps lazily, so all playing clients share the
+            // same command history baseline. Standalone streaming uses per-player counts because
+            // commands can be filtered or buffered while a map transfer is in flight.
             if (IsStandaloneServer)
             {
                 foreach (var p in playerManager.Players)

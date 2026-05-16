@@ -265,6 +265,21 @@ public class PacketTest
     }
 
     [Test]
+    public void ServerDisconnectPacket_AllowsNullDataWhenWriting()
+    {
+        var serialized = new ServerDisconnectPacket
+        {
+            reason = MpDisconnectReason.ServerFull
+        }.Serialize();
+
+        var deserialized = new ServerDisconnectPacket();
+        deserialized.Bind(new PacketReader(new ByteReader(serialized.data)));
+
+        deserialized.reason.Should().Be(MpDisconnectReason.ServerFull);
+        deserialized.data.Should().BeEmpty();
+    }
+
+    [Test]
     public async Task SnapshotBinaryRepresentation()
     {
         var packetsByType = RoundtripPackets().GroupBy(p => p.GetType());

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using Ionic.Zlib;
 using Multiplayer.Client.Desyncs;
+using Multiplayer.Client.Patches;
 using Multiplayer.Client.Saving;
 using Multiplayer.Client.Util;
 using Multiplayer.Common;
@@ -16,6 +17,11 @@ namespace Multiplayer.Client
     [PacketHandlerClass(inheritHandlers: true)]
     public class ClientPlayingState(ConnectionBase connection) : ClientBaseState(connection)
     {
+        public override void StartState()
+        {
+            VTRSync.ForceReportCurrentView();
+        }
+
         [TypedPacketHandler]
         public void HandleCommand(ServerCommandPacket packet)
         {
@@ -278,18 +284,22 @@ namespace Multiplayer.Client
             {
                 var info = Multiplayer.game.sync.knownClientOpinions.FirstOrDefault(b => b.startTick == packet.tick);
                 var response = info?.GetFormattedStackTracesForRange(packet.diffAt) ?? "Traces not available";
+                MpLog.Log(
+                    $"Desync host trace request received: target={packet.playerId}, tick={packet.tick}, diffAt={packet.diffAt}, found={info != null}");
 
-                connection.Send(new ClientTracesPacket
-                    {
-                        playerId = packet.playerId,
-                        rawTraces = GZipStream.CompressString(response),
-                        rawJittedMethods = GZipStream.CompressString(JittedMethods.GetJittedMethodsString())
-                    });
+                connection.SendFragmented(new ClientTracesPacket
+                {
+                    playerId = packet.playerId,
+                    rawTraces = GZipStream.CompressString(response),
+                    rawJittedMethods = GZipStream.CompressString(JittedMethods.GetJittedMethodsString())
+                }.Serialize());
             }
             else if (packet.mode == ServerTracesPacket.Mode.Transfer)
             {
                 var traces = GZipStream.UncompressString(packet.rawTraces);
                 var jittedMethods = GZipStream.UncompressString(packet.rawJittedMethods);
+                MpLog.Log(
+                    $"Desync host traces received: traceBytes={packet.rawTraces?.Length ?? 0}, jittedBytes={packet.rawJittedMethods?.Length ?? 0}");
                 var hostInfo = new SaveableDesyncInfo.HostInfo(traces, jittedMethods);
                 Find.WindowStack.WindowOfType<DesyncedWindow>()?.HandleHostDesyncInfo(hostInfo);
             }

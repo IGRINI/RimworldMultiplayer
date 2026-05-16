@@ -159,7 +159,9 @@ namespace Multiplayer.Client.Comp
         {
             if (mapQuestsCache.TryGetValue(mapAsyncTimeComp, out var quests))
             {
-                worldQuestsCache.AddRange(quests);
+                foreach (var quest in quests.ToList())
+                    UpsertWorldQuest(quest);
+
                 return mapQuestsCache.Remove(mapAsyncTimeComp);
             }
 
@@ -172,7 +174,17 @@ namespace Multiplayer.Client.Comp
         /// <param name="quest">Quest to remove</param>
         /// <returns>If quest is found in cache</returns>
         public static bool TryRemoveCachedQuest(Quest quest)
-            => mapQuestsCache.SingleOrDefault(x => x.Value.Contains(quest)).Value?.Remove(quest) ?? false | worldQuestsCache.Remove(quest);
+        {
+            if (quest == null)
+                return false;
+
+            bool removed = worldQuestsCache.RemoveAll(cachedQuest => cachedQuest == quest) > 0;
+
+            foreach (var quests in mapQuestsCache.Values)
+                removed |= quests.RemoveAll(cachedQuest => cachedQuest == quest) > 0;
+
+            return removed;
+        }
 
         /// <summary>
         /// Attempts to get the MapAsyncTimeComp cached for that quest
@@ -207,7 +219,7 @@ namespace Multiplayer.Client.Comp
             //if it doesn't add it to the world quest list
             else
             {
-                worldQuestsCache.Add(quest);
+                UpsertWorldQuest(quest);
                 if (MpVersion.IsDebug)
                     Log.Message($"Info: Could not find AsyncTimeMap for Quest: '{quest.name}'");
             }
@@ -250,10 +262,8 @@ namespace Multiplayer.Client.Comp
         /// <param name="quests">Quests to run QuestTick() on</param>
         private static void TickQuests(IEnumerable<Quest> quests)
         {
-            foreach (var quest in quests)
-            {
+            foreach (var quest in quests.Where(quest => quest != null).Distinct().ToList())
                 quest.QuestTick();
-            }
         }
 
         /// <summary>
@@ -294,6 +304,12 @@ namespace Multiplayer.Client.Comp
             {
                 mapQuestsCache[mapAsyncTimeComp] = new List<Quest> { quest };
             }
+        }
+
+        private static void UpsertWorldQuest(Quest quest)
+        {
+            TryRemoveCachedQuest(quest);
+            worldQuestsCache.Add(quest);
         }
     }
 }

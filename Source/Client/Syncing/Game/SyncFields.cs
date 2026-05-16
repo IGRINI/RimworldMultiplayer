@@ -243,6 +243,8 @@ namespace Multiplayer.Client
             SyncCompRefuelableTargetFuelLevel = Sync.Field(typeof(CompRefuelable), nameof(CompRefuelable.TargetFuelLevel)).SetBufferChanges();
 
             InitFishingZone();
+            RegisterMedicalCarePatches();
+            RegisterRimHudMedicalPatches();
         }
 
         [MpPrefix(typeof(StorytellerUI), nameof(StorytellerUI.DrawStorytellerSelectionInterface))]
@@ -269,11 +271,21 @@ namespace Multiplayer.Client
         [MpPrefix(typeof(HealthCardUtility), nameof(HealthCardUtility.DrawOverviewTab))]
         static void HealthCardUtility_Patch(Pawn pawn)
         {
-            if (pawn.playerSettings != null)
-            {
-                SyncMedCare.Watch(pawn);
-                SyncSelfTend.Watch(pawn);
-            }
+            WatchPawnMedicalSettings(pawn);
+        }
+
+        [MpPrefix(typeof(HealthCardUtility), nameof(HealthCardUtility.DrawPawnHealthCard))]
+        static void HealthCardUtility_DrawPawnHealthCardPatch(Pawn pawn)
+        {
+            WatchPawnMedicalSettings(pawn);
+        }
+
+        private static void WatchPawnMedicalSettings(Pawn pawn)
+        {
+            if (pawn?.playerSettings == null) return;
+
+            SyncMedCare.Watch(pawn);
+            SyncSelfTend.Watch(pawn);
         }
 
         [MpPrefix(typeof(ITab_Pawn_Visitor), nameof(ITab_Pawn_Visitor.FillTab))]
@@ -323,6 +335,18 @@ namespace Multiplayer.Client
         static IEnumerable<DropdownMenuElement<MedicalCareCategory>> MedicalCare_Postfix(IEnumerable<DropdownMenuElement<MedicalCareCategory>> __result, Pawn p)
         {
             return WatchDropdowns(() => SyncMedCare.Watch(p), __result);
+        }
+
+        [MpPrefix(typeof(MedicalCareUtility), nameof(MedicalCareUtility.MedicalCareSelectButton))]
+        static void MedicalCareSelectButton_Patch(Pawn pawn)
+        {
+            SyncMedCare.Watch(pawn);
+        }
+
+        [MpPrefix(typeof(PawnColumnWorker_MedicalCare), nameof(PawnColumnWorker_MedicalCare.DoCell))]
+        static void PawnColumnWorker_MedicalCare_Patch(Pawn pawn)
+        {
+            SyncMedCare.Watch(pawn);
         }
 
         [MpPrefix(typeof(TrainingCardUtility), nameof(TrainingCardUtility.DrawTrainingCard))]

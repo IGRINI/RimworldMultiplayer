@@ -152,18 +152,9 @@ namespace Multiplayer.Client
                 new SaveableDesyncInfo(this, local, remote, diffAt, found)
             ));
 
-            // Section 8 auto-rejoin opt-in. Window stays up; if the setting is on, rejoin fires
-            // after the report has had a chance to write. DesyncedWindow.WindowUpdate flushes the
-            // zip after at most maxWait (5s) — wait one more second on top so the file actually
-            // lands before MemoryUtility.ClearAllMapsAndWorld kicks in and the window is torn
-            // down. Set autosaveOnDesync (or whatever future flag) to write earlier without this
-            // wait if needed.
-            if (Multiplayer.settings.autoRejoinOnDesync)
-                OnMainThread.Schedule(static () =>
-                {
-                    if (Multiplayer.Client != null && Multiplayer.session != null && Multiplayer.session.desynced)
-                        Rejoiner.DoRejoin();
-                }, 6f);
+            // DesyncedWindow owns auto-rejoin for real sync-opinion desyncs. It waits until host
+            // traces are written (or explicitly timed out) before rejoining so the report zip is
+            // useful instead of racing into ClientLoading and dropping Server_Traces.
         }
 
         private static int FindTraceHashesDiffTick(ClientSyncOpinion local, ClientSyncOpinion remote, out bool found)
